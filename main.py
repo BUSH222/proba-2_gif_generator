@@ -1,6 +1,7 @@
 import os
 import cv2
 import numpy as np
+import imageio
 
 
 def to_gray_8u(img):
@@ -151,12 +152,19 @@ def tint_image(img, hex_color="#edb103", strength=1):
     return out_u8
 
 
-def main(in_path='2025-09-20_15-22_proba2_dump_2.235 GHz/SWAP', out_path='results'):
+def main(in_path='2025-09-20_15-22_proba2_dump_2.235 GHz/SWAP',
+         out_path='results',
+         tint_color="#ff5900",
+         tint_strength=0.4,
+         gif_speed=0.1,
+         extra_rotation=0):
     os.makedirs(out_path, exist_ok=True)
     fnames = [f for f in sorted(os.listdir(in_path)) if f.startswith('SWAP_') and f.endswith('.png')]
     if not fnames:
         print("No matching input files.")
         return
+
+    # Reference
     ref_path = os.path.join(in_path, fnames[0])
     ref_img = cv2.imread(ref_path, cv2.IMREAD_UNCHANGED)
     if ref_img is None:
@@ -168,9 +176,12 @@ def main(in_path='2025-09-20_15-22_proba2_dump_2.235 GHz/SWAP', out_path='result
     h, w = ref_gray.shape[:2]
     mask = circular_mask(h, w, radius=min(r * 0.95, min(h, w) * 0.5 - 6))
 
-    ref_rec_colored = tint_image(ref_rec, "#ff5900", strength=0.4)
+    # Save reference (apply extra rotation then tint)
+    ref_out = rotate_k_image(ref_rec, extra_rotation)
+    ref_rec_colored = tint_image(ref_out, tint_color, strength=tint_strength)
     cv2.imwrite(os.path.join(out_path, fnames[0]), ref_rec_colored)
 
+    # Align and save the rest
     for fname in fnames[1:]:
         src = os.path.join(in_path, fname)
         img = cv2.imread(src, cv2.IMREAD_UNCHANGED)
@@ -184,14 +195,31 @@ def main(in_path='2025-09-20_15-22_proba2_dump_2.235 GHz/SWAP', out_path='result
             continue
 
         gray = to_gray_8u(rec)
-        k, score = best_rotation_to_match(ref_gray, gray, mask)
+        k, _ = best_rotation_to_match(ref_gray, gray, mask)
         aligned = rotate_k_image(rec, k)
+        aligned = rotate_k_image(aligned, extra_rotation)  # apply extra rotation to frames too
 
-        colored = tint_image(aligned, "#ff5900", strength=0.4)
-
+        colored = tint_image(aligned, tint_color, strength=tint_strength)
         cv2.imwrite(os.path.join(out_path, fname), colored)
 
+    # Build GIF from saved frames (already rotated and tinted)
+    out_files = [f for f in sorted(os.listdir(out_path)) if f.endswith('.png')]
+    images = []
+    for f in out_files:
+        img = cv2.imread(os.path.join(out_path, f))
+        if img is not None:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            images.append(img_rgb)
+
+    if images:
+        gif_path = os.path.join(out_path, "out.gif")
+        imageio.mimsave(gif_path, images, duration=gif_speed, loop=0)
 
 
 if __name__ == '__main__':
-    main()
+    tint_color = "#ff5900"
+    tint_strength = 0.4
+    gif_speed = 0.1
+    extra_rotation = 1
+
+    main(tint_color=tint_color, tint_strength=tint_strength, gif_speed=gif_speed, extra_rotation=extra_rotation)
