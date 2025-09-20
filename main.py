@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import imageio
+import argparse
 
 
 def to_gray_8u(img):
@@ -152,8 +153,8 @@ def tint_image(img, hex_color="#edb103", strength=1):
     return out_u8
 
 
-def main(in_path='2025-09-20_15-22_proba2_dump_2.235 GHz/SWAP',
-         out_path='results',
+def main(in_path,
+         out_path,
          tint_color="#ff5900",
          tint_strength=0.4,
          gif_speed=0.1,
@@ -216,10 +217,42 @@ def main(in_path='2025-09-20_15-22_proba2_dump_2.235 GHz/SWAP',
         imageio.mimsave(gif_path, images, duration=gif_speed, loop=0)
 
 
-if __name__ == '__main__':
-    tint_color = "#ff5900"
-    tint_strength = 0.4
-    gif_speed = 0.1
-    extra_rotation = 1
+def _hex_color(s):
+    s = s.strip()
+    if not s:
+        raise argparse.ArgumentTypeError("tint_color cannot be empty")
+    if s[0] != '#':
+        s = '#' + s
+    if len(s) != 7:
+        raise argparse.ArgumentTypeError("tint_color must be #RRGGBB")
+    try:
+        int(s[1:], 16)
+    except ValueError:
+        raise argparse.ArgumentTypeError("tint_color must be hex #RRGGBB")
+    return s
 
-    main(tint_color=tint_color, tint_strength=tint_strength, gif_speed=gif_speed, extra_rotation=extra_rotation)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Recenter, rotation-align (by 90° steps), tint, and GIF frames.')
+    parser.add_argument('--in_path', '-i', required=True,
+                        help='Input folder with PNG frames')
+    parser.add_argument('--out_path', '-o', required=True,
+                        help='Output folder for processed frames and GIF')
+    parser.add_argument('--extra_rotation', '-r', type=int, choices=[0, 1, 2, 3], default=0,
+                        help='Extra CCW rotation in 90° steps (0..3, default: 0)')
+    parser.add_argument('--tint_color', default='#ff5900', type=_hex_color,
+                        help='Tint color as #RRGGBB (default: #ff5900)')
+    parser.add_argument('--tint_strength', type=float, default=0.4,
+                        help='Tint strength in [0,1] (default: 0.4)')
+    parser.add_argument('--gif_speed', type=float, default=0.1,
+                        help='Frame duration in seconds (default: 0.1)')
+    args = parser.parse_args()
+
+    main(
+        in_path=args.in_path,
+        out_path=args.out_path,
+        tint_color=args.tint_color,
+        tint_strength=args.tint_strength,
+        gif_speed=args.gif_speed,
+        extra_rotation=args.extra_rotation
+    )
