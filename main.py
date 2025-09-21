@@ -46,38 +46,90 @@ def match_rotation(img_base, img_to_rotate):
     return aligned_img, best_score
 
 
+def feature_align(img_base, img_to_align, max_features=500, good_match_percent=0.15):
+    """Align img_to_align to img_base using feature matching + affine transform."""
+    # ORB works well for grayscale
+    orb = cv2.ORB_create(max_features)
+
+    # Detect keypoints and descriptors
+    kp1, des1 = orb.detectAndCompute(img_base, None)
+    kp2, des2 = orb.detectAndCompute(img_to_align, None)
+
+    if des1 is None or des2 is None:
+        return img_to_align, np.eye(2, 3, dtype=np.float32)
+
+    # Match descriptors
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = matcher.match(des1, des2)
+
+    if len(matches) < 4:
+        return img_to_align, np.eye(2, 3, dtype=np.float32)
+
+    # Sort matches by score
+    matches = sorted(matches, key=lambda x: x.distance)
+    num_good = int(len(matches) * good_match_percent)
+    matches = matches[:max(4, num_good)]
+
+    # Extract matched points
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
+
+    # Estimate affine transform (translation + rotation + scale)
+    M, inliers = cv2.estimateAffinePartial2D(pts2.reshape(-1,1,2), pts1.reshape(-1,1,2))
+
+    if M is None:
+        return img_to_align, np.eye(2, 3, dtype=np.float32)
+
+    # Warp the image
+    h, w = img_base.shape[:2]
+    aligned = cv2.warpAffine(img_to_align, M, (w, h),
+                             flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+    return aligned, M
+
+
 def main(in_path, out_path, extra_rotation=0):
-    sample_path = os.path.join(in_path, sorted(os.listdir(in_path), key=lambda x: (len(x), x) if x.endswith('.png') else (float('inf'), 0))[0])
+    sample_path = os.path.join(
+        in_path,
+        sorted(os.listdir(in_path), key=lambda x: (len(x), x) if x.endswith('.png') else (float('inf'), 0))[0]
+    )
     sample_image = cv2.imread(sample_path, cv2.IMREAD_UNCHANGED)
+
+    if not os.path.exists(out_path):
+        os.makedirs(out_path)
+
     for file_name in sorted(os.listdir(in_path), key=lambda x: (len(x), x)):
-        if file_name.endswith('.png'):
-            img = cv2.imread(os.path.join(in_path, file_name), cv2.IMREAD_UNCHANGED)
-            circles = find_circle(img)
-            print(circles)
-            centered_img = shift_image(img, circles[0], circles[1])
-            rotated_img, best_rotation = match_rotation(sample_image, centered_img)
-            print(best_rotation)
-            rotated_circles = find_circle(rotated_img)
-            print(rotated_circles)
-            rotated_recentered_img = shift_image(rotated_img, rotated_circles[0], rotated_circles[1])
-            if not os.path.exists(out_path):
-                os.makedirs(out_path)
-            cv2.imwrite(os.path.join(out_path, file_name), rotated_recentered_img)
+        if not file_name.endswith('.png'):
+            continue
 
-            # gifs
+        img = cv2.imread(os.path.join(in_path, file_name), cv2.IMREAD_UNCHANGED)
 
-            out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (len(x), x)) if f.endswith('.png')]
-            images = []
-            for f in out_files:
-                img = cv2.imread(os.path.join(out_path, f))
-                if img is not None:
-                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    images.append(img_rgb)
+        # --- Pre-alignment: circle recenter + coarse rotation ---
+        circles = find_circle(img)
+        centered_img = shift_image(img, circles[0], circles[1])
+        rotated_img, best_rotation = match_rotation(sample_image, centered_img)
+        rotated_circles = find_circle(rotated_img)
+        rotated_recentered_img = shift_image(rotated_img, rotated_circles[0], rotated_circles[1])
 
-            if images:
-                gif_path = os.path.join(out_path, "out.gif")
-                imageio.mimsave(gif_path, images, duration=0.1, loop=0)
-    pass
+        # --- Fine alignment using ORB feature matching ---
+        fine_aligned, M = feature_align(sample_image, rotated_recentered_img)
+
+        # Save output
+        cv2.imwrite(os.path.join(out_path, file_name), fine_aligned)
+
+    # --- Make GIF ---
+    out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (len(x), x)) if f.endswith('.png')]
+    images = []
+    for f in out_files:
+        img = cv2.imread(os.path.join(out_path, f))
+        if img is not None:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            images.append(img_rgb)
+
+    if images:
+        gif_path = os.path.join(out_path, "out.gif")
+        imageio.mimsave(gif_path, images, duration=0.1, loop=0)
 
 
 if __name__ == '__main__':
