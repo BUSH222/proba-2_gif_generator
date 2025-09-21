@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import argparse
 import imageio
+import subprocess
 
 
 def find_circle(img):
@@ -30,7 +31,6 @@ def shift_image(img, current_x, current_y, target_x=1024/2, target_y=1024/2):
     translation_matrix = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
     shifted_img = cv2.warpAffine(img, translation_matrix, (img.shape[1], img.shape[0]))
     return shifted_img
-
 
 
 def match_rotation(img_base, img_to_rotate):
@@ -75,7 +75,7 @@ def feature_align(img_base, img_to_align, max_features=500, good_match_percent=0
     pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
 
     # Estimate affine transform (translation + rotation + scale)
-    M, inliers = cv2.estimateAffinePartial2D(pts2.reshape(-1,1,2), pts1.reshape(-1,1,2))
+    M, inliers = cv2.estimateAffinePartial2D(pts2.reshape(-1, 1, 2), pts1.reshape(-1, 1, 2))
 
     if M is None:
         return img_to_align, np.eye(2, 3, dtype=np.float32)
@@ -87,6 +87,15 @@ def feature_align(img_base, img_to_align, max_features=500, good_match_percent=0
                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
     return aligned, M
+
+
+def run_imagemagick_tint(out_path):
+    cmd = ['magick', 'mogrify', '-fill', '#edb103', '-tint', '100', '-contrast-stretch', '0.3%', 'SWAP_*.png']
+    try:
+        subprocess.run(cmd, cwd=out_path, check=True)
+    except FileNotFoundError:
+        cmd = ['mogrify', '-fill', '#edb103', '-tint', '100', '-contrast-stretch', '0.3%', 'SWAP_*.png']
+        subprocess.run(cmd, cwd=out_path, check=True)
 
 
 def main(in_path, out_path, extra_rotation=0):
@@ -117,6 +126,11 @@ def main(in_path, out_path, extra_rotation=0):
 
         # Save output
         cv2.imwrite(os.path.join(out_path, file_name), fine_aligned)
+
+    try:
+        run_imagemagick_tint(out_path)
+    except subprocess.CalledProcessError as e:
+        print(f"ImageMagick mogrify failed: {e}")
 
     # --- Make GIF ---
     out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (len(x), x)) if f.endswith('.png')]
