@@ -153,6 +153,44 @@ def tint_image(img, hex_color="#edb103", strength=1):
     return out_u8
 
 
+def tint_image_original(img, strength=0.5):
+    """
+    Mimic macOS Night Shift by shifting white balance toward warmer tones.
+    
+    Args:
+        img: numpy array (H,W), (H,W,3), or (H,W,4), dtype=uint8.
+        strength: float in [0,1], degree of warmth (0=no change, 1=max warm).
+    
+    Returns:
+        BGR uint8 image with warm shift applied.
+    """
+    img_f = img.astype(np.float32) / 255.0
+
+    # Drop alpha if present
+    if img_f.ndim == 3 and img_f.shape[2] == 4:
+        img_f = img_f[:, :, :3]
+
+    # If grayscale, expand to 3 channels
+    if img_f.ndim == 2:
+        img_f = np.stack([img_f, img_f, img_f], axis=2)
+
+    # White balance multipliers
+    # At strength=1.0: red ~1.0, green ~0.9, blue ~0.6 (example warm balance)
+    r_gain = 1.0
+    g_gain = 1.0 - 0.1 * strength
+    b_gain = 1.0 - 0.4 * strength
+
+    gains = np.array([b_gain, g_gain, r_gain], dtype=np.float32)
+
+    # Apply gains per channel
+    out = img_f * gains[None, None, :]
+
+    # Normalize so we don't wash out whites
+    out = np.clip(out, 0, 1)
+
+    return (out * 255).astype(np.uint8)
+
+
 def main(in_path,
          out_path,
          tint_color="#ff5900",
@@ -160,7 +198,7 @@ def main(in_path,
          gif_speed=0.1,
          extra_rotation=0):
     os.makedirs(out_path, exist_ok=True)
-    fnames = [f for f in sorted(os.listdir(in_path)) if f.startswith('SWAP_') and f.endswith('.png')]
+    fnames = [f for f in sorted(os.listdir(in_path), key=lambda x: (len(x), x)) if f.startswith('SWAP_') and f.endswith('.png')]
     if not fnames:
         print("No matching input files.")
         return
@@ -180,7 +218,8 @@ def main(in_path,
     # Save reference (apply extra rotation then tint)
     ref_out = rotate_k_image(ref_rec, extra_rotation)
     ref_rec_colored = tint_image(ref_out, tint_color, strength=tint_strength)
-    cv2.imwrite(os.path.join(out_path, fnames[0]), ref_rec_colored)
+    ref_rec_colored_warm = tint_image_original(ref_rec_colored, strength=2)
+    cv2.imwrite(os.path.join(out_path, fnames[0]), ref_rec_colored_warm)
 
     # Align and save the rest
     for fname in fnames[1:]:
@@ -240,7 +279,7 @@ if __name__ == '__main__':
                         help='Output folder for processed frames and GIF')
     parser.add_argument('--extra_rotation', '-r', type=int, choices=[0, 1, 2, 3], default=0,
                         help='Extra CCW rotation in 90° steps (0..3, default: 0)')
-    parser.add_argument('--tint_color', default='#ff5900', type=_hex_color,
+    parser.add_argument('--tint_color', default="#e57200", type=_hex_color,
                         help='Tint color as #RRGGBB (default: #ff5900)')
     parser.add_argument('--tint_strength', type=float, default=0.4,
                         help='Tint strength in [0,1] (default: 0.4)')
