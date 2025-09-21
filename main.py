@@ -191,6 +191,41 @@ def tint_image_original(img, strength=0.5):
     return (out * 255).astype(np.uint8)
 
 
+def contrast_stretch(img, black_point=0.3, white_point=0):
+    if white_point is None:
+        white_point = black_point
+    
+    img_f = img.astype(np.float32)
+
+    # Handle grayscale or color channels independently
+    if img_f.ndim == 2:
+        channels = [img_f]
+    else:
+        channels = [img_f[..., c] for c in range(img_f.shape[2])]
+
+    stretched_channels = []
+    for ch in channels:
+        # Flatten and compute percentiles
+        low = np.percentile(ch, black_point)
+        high = np.percentile(ch, 100 - white_point)
+
+        if high <= low:
+            # avoid div/0 – just return original channel
+            stretched = ch
+        else:
+            stretched = (ch - low) * 255.0 / (high - low)
+            stretched = np.clip(stretched, 0, 255)
+
+        stretched_channels.append(stretched)
+
+    if img_f.ndim == 2:
+        out = stretched_channels[0]
+    else:
+        out = cv2.merge([c.astype(np.float32) for c in stretched_channels])
+
+    return out.astype(np.uint8)
+
+
 def main(in_path,
          out_path,
          tint_color="#ff5900",
@@ -217,7 +252,8 @@ def main(in_path,
 
     # Save reference (apply extra rotation then tint)
     ref_out = rotate_k_image(ref_rec, extra_rotation)
-    ref_rec_colored = tint_image(ref_out, tint_color, strength=tint_strength)
+    ref_out_stretched = contrast_stretch(ref_out, black_point=5, white_point=0.2)
+    ref_rec_colored = tint_image(ref_out_stretched, tint_color, strength=tint_strength)
     ref_rec_colored_warm = tint_image_original(ref_rec_colored, strength=2)
     cv2.imwrite(os.path.join(out_path, fnames[0]), ref_rec_colored_warm)
 
@@ -240,7 +276,8 @@ def main(in_path,
         aligned = rotate_k_image(aligned, extra_rotation)  # apply extra rotation to frames too
 
         colored = tint_image(aligned, tint_color, strength=tint_strength)
-        cv2.imwrite(os.path.join(out_path, fname), colored)
+        colored_warm = tint_image_original(colored, strength=2)
+        cv2.imwrite(os.path.join(out_path, fname), colored_warm)
 
     # Build GIF from saved frames (already rotated and tinted)
     out_files = [f for f in sorted(os.listdir(out_path)) if f.endswith('.png')]
