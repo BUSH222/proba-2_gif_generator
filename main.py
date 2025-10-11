@@ -116,6 +116,9 @@ def main(in_path, out_path, extra_rotation=0):
 
         # --- Pre-alignment: circle recenter + coarse rotation ---
         circles = find_circle(img)
+        if circles is None:
+            print(f"Warning: No circle found in {file_name}, skipping.")
+            continue
         centered_img = shift_image(img, circles[0], circles[1])
         rotated_img, best_rotation = match_rotation(sample_image, centered_img)
         rotated_circles = find_circle(rotated_img)
