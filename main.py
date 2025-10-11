@@ -138,8 +138,29 @@ def main(in_path, out_path, extra_rotation=0):
     # --- Make GIF ---
     out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (len(x), x)) if f.endswith('.png')]
     images = []
-    for f in out_files:
-        img = cv2.imread(os.path.join(out_path, f))
+    tmp_dir = os.path.join(out_path, "_tmp_rot")
+    if extra_rotation:
+        # Create temp dir for rotated frames
+        if not os.path.exists(tmp_dir):
+            os.makedirs(tmp_dir)
+        angle = 90 * extra_rotation
+        rotated_files = []
+        for f in out_files:
+            src = os.path.join(out_path, f)
+            dst = os.path.join(tmp_dir, f)
+            # Use ImageMagick to rotate
+            cmd = ["magick", "convert", src, "-rotate", str(angle), dst]
+            try:
+                subprocess.run(cmd, check=True)
+                rotated_files.append(dst)
+            except Exception as e:
+                print(f"ImageMagick rotate failed for {f}: {e}")
+        gif_files = rotated_files
+    else:
+        gif_files = [os.path.join(out_path, f) for f in out_files]
+
+    for f in gif_files:
+        img = cv2.imread(f)
         if img is not None:
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             images.append(img_rgb)
@@ -147,6 +168,18 @@ def main(in_path, out_path, extra_rotation=0):
     if images:
         gif_path = os.path.join(out_path, "out.gif")
         imageio.mimsave(gif_path, images, duration=0.1, loop=0)
+
+    # Clean up temp rotated frames
+    if extra_rotation and os.path.exists(tmp_dir):
+        for f in os.listdir(tmp_dir):
+            try:
+                os.remove(os.path.join(tmp_dir, f))
+            except Exception:
+                pass
+        try:
+            os.rmdir(tmp_dir)
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
