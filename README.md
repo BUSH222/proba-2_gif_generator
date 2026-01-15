@@ -2,7 +2,7 @@
 
 This project uses several image processing techniques to stabilize and color raw imagery from ESA's PROBA-2 satellite. The data is obtained using SatDump.
 
-Here is an example of the output of this application:
+Here is an example output of this application:
 ![result](out.gif)
 
 ### Algorithm
