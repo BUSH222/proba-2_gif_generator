@@ -3,7 +3,7 @@
 This project uses several image processing techniques to stabilize and color raw imagery from ESA's PROBA-2 satellite. The data is obtained using SatDump.
 
 Here is an example of the output of this application:
-![result]('2025-09-20_15-22_proba2_dump_2.235 GHz/SWAP_pro/out.gif')
+![result](out.gif)
 
 ### Algorithm
 1) Median blur to reduce noise for circle detection
