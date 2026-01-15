@@ -7,6 +7,7 @@ import subprocess
 
 
 def find_circle(img):
+    '''Detect circle in the image using Hough Transform.'''
     blurred = cv2.medianBlur(img, 5)
     circles = cv2.HoughCircles(
         blurred,
@@ -26,6 +27,7 @@ def find_circle(img):
 
 
 def shift_image(img, current_x, current_y, target_x=1024/2, target_y=1024/2):
+    '''Shift image so that (current_x, current_y) moves to (target_x, target_y).'''
     shift_x = target_x - current_x
     shift_y = target_y - current_y
     translation_matrix = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
@@ -34,6 +36,7 @@ def shift_image(img, current_x, current_y, target_x=1024/2, target_y=1024/2):
 
 
 def match_rotation(img_base, img_to_rotate):
+    """Find best 90° step rotation of img_to_rotate to match img_base."""
     correlations = []
     for k in range(4):
         rotated_img = np.rot90(img_to_rotate, k)
@@ -48,39 +51,32 @@ def match_rotation(img_base, img_to_rotate):
 
 def feature_align(img_base, img_to_align, max_features=500, good_match_percent=0.15):
     """Align img_to_align to img_base using feature matching + affine transform."""
-    # ORB works well for grayscale
     orb = cv2.ORB_create(max_features)
 
-    # Detect keypoints and descriptors
     kp1, des1 = orb.detectAndCompute(img_base, None)
     kp2, des2 = orb.detectAndCompute(img_to_align, None)
 
     if des1 is None or des2 is None:
         return img_to_align, np.eye(2, 3, dtype=np.float32)
 
-    # Match descriptors
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     matches = matcher.match(des1, des2)
 
     if len(matches) < 4:
         return img_to_align, np.eye(2, 3, dtype=np.float32)
 
-    # Sort matches by score
     matches = sorted(matches, key=lambda x: x.distance)
     num_good = int(len(matches) * good_match_percent)
     matches = matches[:max(4, num_good)]
 
-    # Extract matched points
     pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
     pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
 
-    # Estimate affine transform (translation + rotation + scale)
     M, inliers = cv2.estimateAffinePartial2D(pts2.reshape(-1, 1, 2), pts1.reshape(-1, 1, 2))
 
     if M is None:
         return img_to_align, np.eye(2, 3, dtype=np.float32)
 
-    # Warp the image
     h, w = img_base.shape[:2]
     aligned = cv2.warpAffine(img_to_align, M, (w, h),
                              flags=cv2.INTER_LINEAR,
@@ -90,18 +86,19 @@ def feature_align(img_base, img_to_align, max_features=500, good_match_percent=0
 
 
 def run_imagemagick_tint(out_path):
-    cmd = ['magick', 'mogrify', '-fill', '#edb103', '-tint', '100', '-contrast-stretch', '0.3%', 'SWAP_*.png']
+    cmd = ['magick', 'mogrify', '-fill', '#edb103', '-tint', '100', '-contrast-stretch', '0.3%', 'SWAP_*']
     try:
         subprocess.run(cmd, cwd=out_path, check=True)
     except FileNotFoundError:
-        cmd = ['mogrify', '-fill', '#edb103', '-tint', '100', '-contrast-stretch', '0.3%', 'SWAP_*.png']
+        cmd = ['mogrify', '-fill', '#edb103', '-tint', '100', '-contrast-stretch', '0.3%', 'SWAP_*']
         subprocess.run(cmd, cwd=out_path, check=True)
 
 
-def main(in_path, out_path, extra_rotation=0):
+def main(in_path, out_path, extra_rotation=0, no_magick=False):
     sample_path = os.path.join(
         in_path,
-        sorted(os.listdir(in_path), key=lambda x: (len(x), x) if x.endswith('.png') else (float('inf'), 0))[0]
+        sorted(os.listdir(in_path), key=lambda x: (len(x), x) if (x.endswith('.png') or x.endswith('.jpg'))
+               else (float('inf'), 0))[0]
     )
     sample_image = cv2.imread(sample_path, cv2.IMREAD_UNCHANGED)
 
@@ -109,7 +106,7 @@ def main(in_path, out_path, extra_rotation=0):
         os.makedirs(out_path)
 
     for file_name in sorted(os.listdir(in_path), key=lambda x: (len(x), x)):
-        if not file_name.endswith('.png'):
+        if not (file_name.endswith('.png') or file_name.endswith('.jpg')):
             continue
 
         img = cv2.imread(os.path.join(in_path, file_name), cv2.IMREAD_UNCHANGED)
@@ -122,6 +119,9 @@ def main(in_path, out_path, extra_rotation=0):
         centered_img = shift_image(img, circles[0], circles[1])
         rotated_img, best_rotation = match_rotation(sample_image, centered_img)
         rotated_circles = find_circle(rotated_img)
+        if rotated_circles is None:
+            print(f"Warning: No circle found after rotation in {file_name}, skipping.")
+            continue
         rotated_recentered_img = shift_image(rotated_img, rotated_circles[0], rotated_circles[1])
 
         # --- Fine alignment using ORB feature matching ---
@@ -130,32 +130,40 @@ def main(in_path, out_path, extra_rotation=0):
         # Save output
         cv2.imwrite(os.path.join(out_path, file_name), fine_aligned)
 
-    try:
-        run_imagemagick_tint(out_path)
-    except subprocess.CalledProcessError as e:
-        print(f"ImageMagick mogrify failed: {e}")
+    if not no_magick:
+        try:
+            run_imagemagick_tint(out_path)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"ImageMagick mogrify failed: {e}. You can use --no_magick to disable it.")
+    else:
+        print("Skipping ImageMagick tinting.")
 
     # --- Make GIF ---
-    out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (len(x), x)) if f.endswith('.png')]
+    out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (len(x), x))
+                 if (f.endswith('.png') or f.endswith('.jpg'))]
     images = []
     tmp_dir = os.path.join(out_path, "_tmp_rot")
     if extra_rotation:
-        # Create temp dir for rotated frames
-        if not os.path.exists(tmp_dir):
-            os.makedirs(tmp_dir)
-        angle = 90 * extra_rotation
-        rotated_files = []
-        for f in out_files:
-            src = os.path.join(out_path, f)
-            dst = os.path.join(tmp_dir, f)
-            # Use ImageMagick to rotate
-            cmd = ["magick", "convert", src, "-rotate", str(angle), dst]
-            try:
-                subprocess.run(cmd, check=True)
-                rotated_files.append(dst)
-            except Exception as e:
-                print(f"ImageMagick rotate failed for {f}: {e}")
-        gif_files = rotated_files
+        if no_magick:
+            print("Skipping extra rotation as ImageMagick is disabled.")
+            gif_files = [os.path.join(out_path, f) for f in out_files]
+        else:
+            # Create temp dir for rotated frames
+            if not os.path.exists(tmp_dir):
+                os.makedirs(tmp_dir)
+            angle = 90 * extra_rotation
+            rotated_files = []
+            for f in out_files:
+                src = os.path.join(out_path, f)
+                dst = os.path.join(tmp_dir, f)
+                # Use ImageMagick to rotate
+                cmd = ["magick", "convert", src, "-rotate", str(angle), dst]
+                try:
+                    subprocess.run(cmd, check=True)
+                    rotated_files.append(dst)
+                except Exception as e:
+                    print(f"ImageMagick rotate failed for {f}: {e}")
+            gif_files = rotated_files
     else:
         gif_files = [os.path.join(out_path, f) for f in out_files]
 
@@ -169,7 +177,6 @@ def main(in_path, out_path, extra_rotation=0):
         gif_path = os.path.join(out_path, "out.gif")
         imageio.mimsave(gif_path, images, duration=0.1, loop=0)
 
-    # Clean up temp rotated frames
     if extra_rotation and os.path.exists(tmp_dir):
         for f in os.listdir(tmp_dir):
             try:
@@ -184,16 +191,23 @@ def main(in_path, out_path, extra_rotation=0):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Recenter, rotation-align (by 90° steps), tint, and GIF frames.')
-    parser.add_argument('--in_path', '-i', default='2025-09-20_15-22_proba2_dump_2.235 GHz/SWAP',
+    parser.add_argument('--in_path', '-i', required=True,
                         help='Input folder with PNG frames')
-    parser.add_argument('--out_path', '-o', default='results',
-                        help='Output folder for processed frames and GIF')
+    parser.add_argument('--out_path', '-o', default=None,
+                        help='Output folder for processed frames and GIF (default: <in_path>_pro)')
     parser.add_argument('--extra_rotation', '-r', type=int, choices=[0, 1, 2, 3], default=0,
                         help='Extra CCW rotation in 90° steps (0..3, default: 0)')
+    parser.add_argument('--no_magick', action='store_true',
+                        help='Use this flag if magick is not installed as a global command. \
+                        Some features will be disabled but the program will run.')
     args = parser.parse_args()
+
+    if args.out_path is None:
+        args.out_path = args.in_path.rstrip('/\\') + '_pro'
 
     main(
         in_path=args.in_path,
         out_path=args.out_path,
-        extra_rotation=args.extra_rotation
+        extra_rotation=args.extra_rotation,
+        no_magick=args.no_magick
     )
