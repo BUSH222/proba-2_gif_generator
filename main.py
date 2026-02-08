@@ -94,7 +94,7 @@ def run_imagemagick_tint(out_path):
         subprocess.run(cmd, cwd=out_path, check=True)
 
 
-def main(in_path, out_path, extra_rotation=0, no_magick=False):
+def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5):
     sample_path = os.path.join(
         in_path,
         sorted(os.listdir(in_path), key=lambda x: (len(x), x) if (x.endswith('.png') or x.endswith('.jpg'))
@@ -105,13 +105,14 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False):
     if not os.path.exists(out_path):
         os.makedirs(out_path)
 
+    processed_count = 0
+
     for file_name in sorted(os.listdir(in_path), key=lambda x: (len(x), x)):
         if not (file_name.endswith('.png') or file_name.endswith('.jpg')):
             continue
 
         img = cv2.imread(os.path.join(in_path, file_name), cv2.IMREAD_UNCHANGED)
 
-        # --- Pre-alignment: circle recenter + coarse rotation ---
         circles = find_circle(img)
         if circles is None:
             print(f"Warning: No circle found in {file_name}, skipping.")
@@ -124,11 +125,13 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False):
             continue
         rotated_recentered_img = shift_image(rotated_img, rotated_circles[0], rotated_circles[1])
 
-        # --- Fine alignment using ORB feature matching ---
         fine_aligned, M = feature_align(sample_image, rotated_recentered_img)
 
-        # Save output
         cv2.imwrite(os.path.join(out_path, file_name), fine_aligned)
+
+        processed_count += 1
+        if processed_count % 2 == 0:
+            sample_image = fine_aligned.copy()
 
     if not no_magick:
         try:
@@ -138,7 +141,7 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False):
     else:
         print("Skipping ImageMagick tinting.")
 
-    # --- Make GIF ---
+    # Gif creation
     out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (len(x), x))
                  if (f.endswith('.png') or f.endswith('.jpg'))]
     images = []
@@ -148,7 +151,6 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False):
             print("Skipping extra rotation as ImageMagick is disabled.")
             gif_files = [os.path.join(out_path, f) for f in out_files]
         else:
-            # Create temp dir for rotated frames
             if not os.path.exists(tmp_dir):
                 os.makedirs(tmp_dir)
             angle = 90 * extra_rotation
@@ -156,7 +158,6 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False):
             for f in out_files:
                 src = os.path.join(out_path, f)
                 dst = os.path.join(tmp_dir, f)
-                # Use ImageMagick to rotate
                 cmd = ["magick", "convert", src, "-rotate", str(angle), dst]
                 try:
                     subprocess.run(cmd, check=True)
@@ -175,7 +176,7 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False):
 
     if images:
         gif_path = os.path.join(out_path, "out.gif")
-        imageio.mimsave(gif_path, images, duration=0.1, loop=0)
+        imageio.mimsave(gif_path, images, 'GIF', fps=fps)
 
     if extra_rotation and os.path.exists(tmp_dir):
         for f in os.listdir(tmp_dir):
@@ -200,6 +201,8 @@ if __name__ == '__main__':
     parser.add_argument('--no_magick', action='store_true',
                         help='Use this flag if magick is not installed as a global command. \
                         Some features will be disabled but the program will run.')
+    parser.add_argument('--fps', '-f', type=int, default=10,
+                        help='GIF frames per second (default: 10)')
     args = parser.parse_args()
 
     if args.out_path is None:
@@ -209,5 +212,6 @@ if __name__ == '__main__':
         in_path=args.in_path,
         out_path=args.out_path,
         extra_rotation=args.extra_rotation,
-        no_magick=args.no_magick
+        no_magick=args.no_magick,
+        fps=args.fps
     )
