@@ -29,4 +29,5 @@ Here is an example output of this application:
 2) Output path: `--out_path`, `-o` — output folder for processed frames and the GIF (default computed as input path + _pro).
 3) Extra rotation: `--extra_rotation`, `-r` (int, choices 0/1/2/3, default 0) — extra CCW rotation in 90° steps applied when generating rotated frames for the GIF.
 4) Disable ImageMagick: `--no_magick` (flag) — disable ImageMagick usage; tinting and ImageMagick-based extra rotation will be skipped or fallback behavior used.
+5) Gif FPS --fps (int, default 10)
 
