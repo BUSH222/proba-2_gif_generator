@@ -176,7 +176,7 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5):
 
     if images:
         gif_path = os.path.join(out_path, "out.gif")
-        imageio.mimsave(gif_path, images, 'GIF', fps=fps)
+        imageio.mimsave(gif_path, images, 'GIF', fps=fps, loop=0)
 
     if extra_rotation and os.path.exists(tmp_dir):
         for f in os.listdir(tmp_dir):
