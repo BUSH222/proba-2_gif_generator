@@ -89,7 +89,7 @@ def run_imagemagick_tint(out_path):
     cmd = ['magick', 'mogrify', '-fill', '#edb103', '-tint', '100', '-contrast-stretch', '0.3%', 'SWAP_*']
     try:
         subprocess.run(cmd, cwd=out_path, check=True)
-    except FileNotFoundError:
+    except Exception:
         cmd = ['mogrify', '-fill', '#edb103', '-tint', '100', '-contrast-stretch', '0.3%', 'SWAP_*']
         subprocess.run(cmd, cwd=out_path, check=True)
 
@@ -163,6 +163,12 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5):
                     subprocess.run(cmd, check=True)
                     rotated_files.append(dst)
                 except Exception as e:
+                    cmd = ["convert", src, "-rotate", str(angle), dst]
+                    try:
+                        subprocess.run(cmd, check=True)
+                        rotated_files.append(dst)
+                    except Exception:
+                        print(f"Failed to rotate image {f} with both magick and convert commands.")
                     print(f"ImageMagick rotate failed for {f}: {e}")
             gif_files = rotated_files
     else:
