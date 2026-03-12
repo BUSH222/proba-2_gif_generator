@@ -16,8 +16,8 @@ def find_circle(img):
         minDist=img.shape[0] // 8,
         param1=50,
         param2=30,
-        minRadius=300,
-        maxRadius=308
+        minRadius=294,
+        maxRadius=310
     )
 
     if circles is not None:

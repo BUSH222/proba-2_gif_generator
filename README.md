@@ -23,6 +23,8 @@ Here is an example output of this application:
 2) Install the requirements mentioned above
 3) Run main.py with the proper command line arguments
 
+Optional: For better coronal visibility remove all the files (the masks) from resources/proba/swap. This will make the image slightly noisier though.
+
 ### Command line arguments:
 
 1) Input path: `--in_path`, `-i` (required) — input folder containing PNG/JPG frames to process.
