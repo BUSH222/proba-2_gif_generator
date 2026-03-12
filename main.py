@@ -49,7 +49,8 @@ def match_rotation(img_base, img_to_rotate):
     return aligned_img, best_score
 
 
-def feature_align(img_base, img_to_align, max_features=500, good_match_percent=0.15):
+def feature_align(img_base, img_to_align, max_features=500, good_match_percent=0.15,
+                  max_translation=20, max_rotation_deg=15, min_scale=0.9, max_scale=1.1):
     """Align img_to_align to img_base using feature matching + affine transform."""
     orb = cv2.ORB_create(max_features)
 
@@ -77,6 +78,27 @@ def feature_align(img_base, img_to_align, max_features=500, good_match_percent=0
     if M is None:
         return img_to_align, np.eye(2, 3, dtype=np.float32)
 
+    tx, ty = M[0, 2], M[1, 2]
+    a, b = M[0, 0], M[1, 0]
+
+    translation_magnitude = np.sqrt(tx**2 + ty**2)
+
+    rotation_rad = np.arctan2(b, a)
+    rotation_deg = np.degrees(rotation_rad)
+
+    scale = np.sqrt(a**2 + b**2)
+
+    if translation_magnitude > max_translation:
+        print(f"Warning: Translation too large ({translation_magnitude:.1f} > {max_translation} px), skipping.")
+        return img_to_align, np.eye(2, 3, dtype=np.float32)
+
+    if abs(rotation_deg) > max_rotation_deg:
+        print(f"Warning: Rotation too large ({rotation_deg:.1f}° > ±{max_rotation_deg}°), skipping.")
+        return img_to_align, np.eye(2, 3, dtype=np.float32)
+
+    if scale < min_scale or scale > max_scale:
+        print(f"Warning: Scale out of range ({scale:.3f} not in [{min_scale}, {max_scale}]), skipping.")
+        return img_to_align, np.eye(2, 3, dtype=np.float32)
     h, w = img_base.shape[:2]
     aligned = cv2.warpAffine(img_to_align, M, (w, h),
                              flags=cv2.INTER_LINEAR,
