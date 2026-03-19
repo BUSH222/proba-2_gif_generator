@@ -1,5 +1,8 @@
 .DS_Store
 *.png
+*.jpg
+tests/aweeri/SWAP_pro/out.gif
+tests/proba_qkris/all/SWAP_pro/out.gif
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
