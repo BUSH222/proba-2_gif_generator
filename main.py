@@ -119,7 +119,7 @@ def run_imagemagick_tint(out_path):
 def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5):
     sample_path = os.path.join(
         in_path,
-        sorted(os.listdir(in_path), key=lambda x: (len(x), x) if (x.endswith('.png') or x.endswith('.jpg'))
+        sorted(os.listdir(in_path), key=lambda x: (x[:21], len(x), x) if (x.endswith('.png') or x.endswith('.jpg'))
                else (float('inf'), 0))[0]
     )
     sample_image = cv2.imread(sample_path, cv2.IMREAD_UNCHANGED)
@@ -129,7 +129,7 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5):
 
     processed_count = 0
 
-    for file_name in sorted(os.listdir(in_path), key=lambda x: (len(x), x)):
+    for file_name in sorted(os.listdir(in_path), key=lambda x: (x[:21], len(x), x)):
         if not (file_name.endswith('.png') or file_name.endswith('.jpg')):
             continue
 
@@ -164,7 +164,7 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5):
         print("Skipping ImageMagick tinting.")
 
     # Gif creation
-    out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (len(x), x))
+    out_files = [f for f in sorted(os.listdir(out_path), key=lambda x: (x[:21], len(x), x))
                  if (f.endswith('.png') or f.endswith('.jpg'))]
     images = []
     tmp_dir = os.path.join(out_path, "_tmp_rot")
