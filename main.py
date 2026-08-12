@@ -116,7 +116,7 @@ def run_imagemagick_tint(out_path):
         subprocess.run(cmd, cwd=out_path, check=True)
 
 
-def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5):
+def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5, make_mp4=False):
     sample_path = os.path.join(
         in_path,
         sorted(os.listdir(in_path), key=lambda x: (x[:21], len(x), x) if (x.endswith('.png') or x.endswith('.jpg'))
@@ -206,6 +206,10 @@ def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5):
         gif_path = os.path.join(out_path, "out.gif")
         imageio.mimsave(gif_path, images, 'GIF', fps=fps, loop=0)
 
+    if make_mp4:
+        mp4_path = os.path.join(out_path, "out.mp4")
+        imageio.mimsave(mp4_path, images, 'FFMPEG', fps=fps)
+
     if extra_rotation and os.path.exists(tmp_dir):
         for f in os.listdir(tmp_dir):
             try:
@@ -231,6 +235,8 @@ if __name__ == '__main__':
                         Some features will be disabled but the program will run.')
     parser.add_argument('--fps', '-f', type=int, default=10,
                         help='GIF frames per second (default: 10)')
+    parser.add_argument('--make_mp4', action='store_true',
+                        help='Use this flag to create an MP4 video from the processed frames. Requires ffmpeg to be installed.')
     args = parser.parse_args()
 
     if args.out_path is None:
@@ -241,5 +247,6 @@ if __name__ == '__main__':
         out_path=args.out_path,
         extra_rotation=args.extra_rotation,
         no_magick=args.no_magick,
-        fps=args.fps
+        fps=args.fps,
+        make_mp4=args.make_mp4
     )
