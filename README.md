@@ -14,14 +14,14 @@ Here is an example output of this application:
 6) Color with imagemagick (optional)
 
 ## Requirements
-- Python 3 (Tested on python 3.13, should still work above 3.10)
-- Required libraries in `requirements.txt` (`pip install -r requirements.txt` to install)
+- Python 3.14+
+- [uv](https://docs.astral.sh/uv/) (`uv sync` installs the dependencies from `pyproject.toml`)
 - Optional: ImageMagick for color
 
 ## How to run:
 1) clone and navigate to the root of the git repository
-2) Install the requirements mentioned above
-3) Run main.py with the proper command line arguments
+2) Run `uv sync`
+3) Run `uv run main.py` with the proper command line arguments
 
 Optional: For better coronal visibility remove all the files (the masks) from resources/proba/swap. This will make the image slightly noisier though.
 

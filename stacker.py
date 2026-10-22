@@ -1,5 +1,6 @@
 import argparse
 import os
+
 import numpy as np
 from PIL import Image
 
@@ -9,7 +10,7 @@ def load_images(img_paths):
     for p in img_paths:
         try:
             with Image.open(p) as img:
-                images.append(np.array(img.convert('RGB')))
+                images.append(np.array(img.convert("RGB")))
         except Exception as e:
             print(f"Error loading {p}: {e}")
     return np.array(images)
@@ -19,13 +20,13 @@ def main():
     parser = argparse.ArgumentParser(description="Stack images in a directory.")
     parser.add_argument("path", help="Path to the input directory")
     parser.add_argument("--range", default="all", help="Image range (e.g., 'all' or '0-5')")
-    parser.add_argument("--method", choices=["avg", "median", "ks"], default="avg",
-                        help="Stacking method")
-    parser.add_argument("-r", "--extra_rotation", type=int, default=0,
-                        help="Rotate final result by steps of 90° clockwise")
+    parser.add_argument("--method", choices=["avg", "median", "ks"], default="avg", help="Stacking method")
+    parser.add_argument(
+        "-r", "--extra_rotation", type=int, default=0, help="Rotate final result by steps of 90° clockwise"
+    )
     args = parser.parse_args()
 
-    files = [f for f in os.listdir(args.path) if f.lower().endswith(('.png', '.jpg'))]
+    files = [f for f in os.listdir(args.path) if f.lower().endswith((".png", ".jpg"))]
     if not files:
         print("No images found in the specified directory.")
         return
@@ -34,10 +35,10 @@ def main():
 
     if args.range.lower() != "all":
         try:
-            start_str, end_str = args.range.split('-')
+            start_str, end_str = args.range.split("-")
             start = int(start_str)
             end = int(end_str)
-            files = files[start:end+1]
+            files = files[start : end + 1]
         except ValueError:
             print("Invalid range format. Use 'all' or 'start-end' (e.g., '0-5').")
             return
