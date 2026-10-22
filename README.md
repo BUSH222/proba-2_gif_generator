@@ -1,6 +1,9 @@
 # Experimental environment
 Trying to extract LYRA and the calibration data from proba-2 cadus
 
+TODO: To settle APID 22, compare it with a LYRA file for August–October 2025 from the P2SC archive. A matching LED or calibration cycle would confirm it.
+TODO: Check if PROBA-V GPS log format matches PROBA-2's to get more out of APID 18
+
 ## APID 20 (SWAP images)
 
 All offsets are bytes into the packet payload, i.e. after the 6 byte CCSDS primary header, and all numbers are
@@ -82,5 +85,103 @@ images), while the only bytes which change are the ones listed, and none of them
 attitude vector fits either. The rest of the metadata is constant.
 The F4/F6 text records in APID 18 are the only position-like numbers found so far (see `find_apids.ipynb`).
 
-Still to look at: the secondary headers of the later image packets, the housekeeping packets, the other APIDs (2 and 22
-carry a lot of data) and the JPEG stream itself.
+Still to look at: the secondary headers of the later image packets, the housekeeping packets, the other APIDs (2 and 22 are done, see
+below) and the JPEG stream itself.
+
+## APID 2 (housekeeping telemetry)
+
+Explored in `APID_2.ipynb`, on the same 13 dumps. 18 399 packets, 12 280 on virtual channel 2, 6 113 on channel 1 and 6 on channel 5.
+Offsets here are bytes into the whole packet, including the 6 byte primary header.
+
+- **Almost all PUS housekeeping reports.** Byte 6 is `0x10` (PUS version 1), 7 is the service and 8 the subtype. 18 064 packets are
+  service 3 / subtype 25 (housekeeping parameter report), 141 + 139 are service 1 / subtype 1 and 7 (telecommand acceptance and
+  completion). The other 43 (service, subtype) pairs are singletons: packets reassembled across lost frames, with garbage bytes and
+  absurd lengths.
+- **Layout of a report:** bytes 9-10 are `00 01`, 11-14 a 32 bit tick counter, 15-16 a 16 bit fraction, 17-20 zeros, 21 a structure id
+  (SID), and the data from 22 on. `(length, SID)` identifies one fixed layout: 123 of them, 44 with at least 50 reports. The biggest
+  are 104 bytes / SID 30 (2 101 reports), 61 / 55 (2 042), 292 / 100 (1 199) and 132 / 0 (900).
+- **Time:** the counter grows by a fixed step per layout, 2 ticks for 292 / 100, 5 for 132 / 0, 10 for 61 / 55 and 104 / 30, up to
+  250 for the slow ones. One tick is one second (see APID 18: it runs together with the GPS time). So the reports come every 2 s to
+  about 4 minutes. A first calibration against the SWAP timestamps gave 0.256 s per tick; that was wrong, the SWAP timestamps are what
+  runs slow (see APID 18).
+- **Losses:** 97.8 % of the sequence count steps are 1.
+- **LYRA:** no packet contains the string "LYRA", and no column looks like a four channel science stream. The reports are at best every
+  2 s, which rules out 20 Hz channel data. If LYRA is in here it is housekeeping (temperatures, voltages). Several layouts have groups
+  of 4-7 float columns whose changes are correlated (for example offsets 62-90 of 292 / 1), which would fit, but nothing confirms it.
+- **Attitude:** no group of 4 (quaternion) or 3 (direction) big-endian float32 with unit norm in any layout. Fixed point or float64
+  encodings would not have been found.
+
+Conclusion: APID 2 is spacecraft telemetry and not useful for the sun center. No ICD, so none of the fields are named.
+
+## APID 22 (fast sampled int16 data)
+
+Explored in `APID_22.ipynb`. 11 186 packets, 9 632 on virtual channel 2 and 1 551 on channel 1, 10 of the 13 dumps have some (2 and 6 hold
+most). Offsets are bytes into the whole packet.
+
+- **Packet:** the same header as the APID 2 reports. 11 170 packets have secondary header `10 08 8e`, the others are garbage from lost
+  frames. Bytes 9-10 are `00 01`, 11-14 the tick counter, 15-16 its fraction, 21-22 the data length (packet length minus 25), the data
+  starts at 23 and the last 2 bytes are a CRC-16/CCITT (init `0xFFFF`) over the whole packet, which 99.0 % of the packets pass (the rest
+  have bit errors, the dumps are not RS corrected). Lengths vary from 59 to 1489 bytes, 215 distinct values.
+- **Cadence:** one packet per tick, i.e. per second, in 99.3 % of the steps, sequence counts to match.
+- **Chunks:** the data field is cut from self-describing chunks of 154 or 162 bytes, found by their header: size (word 0),
+  index (1), a type word (2), a 16 bit counter that grows by about 14 per chunk (3), a source id 49 or 50 (4), flags `0x..05` / `0x..0D` (5),
+  then 70 (154 byte chunks) or 74 (162 byte chunks) big-endian int16 samples and a CRC-16/CCITT of the chunk, which 100 % of the found
+  chunks pass. Chunks are not aligned with the packets, about half of the packets start at offset 0.
+- **162 byte chunks** (32 513 found): one continuous stream of 8 interleaved channels, 592 samples/s, so 74 per channel. The stream
+  continues across chunks without a gap (headers and CRCs are not part of it): 74 mod 8 = 2, so the channel of the first sample moves back
+  by 2 per chunk, which is what the data does. Index word 1 counts 0-13 and shows missing chunks. In the longest gap free stretch
+  (444 frames, 6 s) all 8 channels sit at 0 +- 300 and then ramp up together over about 30 frames, one channel up to 29 000 and the others to
+  about 10 000, and fall back at once; the pulse repeats every 129-130 frames (1.75 s).
+- **154 byte chunks** (11 329 found, index 0 and 1 in pairs): one channel, each chunk a linear ramp (for example -550 to -200) that
+  restarts in the next chunk, a sawtooth. 140 samples/s.
+- **LYRA:** possible, not confirmed. The rate (74 Hz per channel) is below LYRA's 100 Hz, and LYRA has two calibration LEDs per detector,
+  which a cycled ramp pulse could be. But 8 channels (LYRA has 4 per unit, 3 units) that are dark between pulses are not a solar irradiance.
+  A LYRA file of the same dates or the ICD is needed to decide.
+- **Sun position / attitude:** nothing in it.
+
+## APID 18 (GPS receiver text)
+
+Explored in `APID_18.ipynb`. 5 025 packets, 4 466 on virtual channel 2. Same packet header as APID 2 and 22, secondary header `10 08 89`.
+
+- **Framing:** data from byte 23 is STX (`0x02`), a text, 2 hex digits holding the XOR of the text bytes, ETX (`0x03`), and the packet CRC-16
+  at the end. 99.5 % of the packets pass both checks. Other packets in this APID are PUS telecommand verification reports (24 bytes,
+  `10 01 01` and `10 01 07`) and 23 byte event reports (`10 05 01`).
+- **Records:** `F4` (44 chars, 2 448 good), `F6` (597 chars, 2 443) and `F9` (one line, "Phoenix s/w version D09Ep (Proba-2 171204)", 17
+  of them). F4 and F6 alternate every 10 ticks. The text is a GPS receiver's (Phoenix is a GPS receiver family).
+- **F4:** `F4`, a digit, a 4 digit week and a second of the week (8 chars), a field `18` + week, a signed counter, a slow counter (1150-1193), a
+  constant `510` and a second time of the week which stays the same for several records and then jumps (it is 2 s to 12 h older than the
+  first one).
+- **F6:** `F6`, a digit, the week and second of the week, 6 chars (`000718`, `747218`), a float (-0.014 to 0.074, clock-like) and 12 channel
+  blocks. A block is: satellite number (0 = unused), a range in metres (19 to 53 million; the receiver clock offset is in it), a carrier
+  phase in cycles, a range rate in m/s (+-8 600), a signal strength (30 to 46) and a status (`00`, `01`, `03`, `07`, `0F`, `1F`). Only
+  `1F` blocks have data (3 052 of them).
+- **It is a GPS clock and the units check out:** the change of the phase is 5.2550 times the change of the range between two records of the
+  same satellite (1 / L1 wavelength = 5.2550), and the change of the range divided by the range rate is 10.00 s, the 10 ticks between the
+  records.
+- **Time:** the week and second give GPS dates in August to October 2025 (the 13 dumps span about 2 months), and the GPS time runs at
+  1.0000 s per tick across all files. So the tick counter of APIDs 2, 22 and 18 is in seconds. The SWAP times of `extract_images.py`
+  (2021-10-31 to 2021-11-16) advance only 0.256 s per GPS second between the files, so they are wrong in date and scale (suspects:
+  satdump's day offset 18630 and the unit of the 32 bit field). The image file names are affected.
+- **Position:** none. F4 and F6 have time and raw satellite measurements only; a position needs the satellite ephemerides, which are not in
+  these records (they could come from the navigation message elsewhere, or from a public ephemeris for these dates).
+- **LYRA / Sun / attitude:** nothing.
+
+Conclusion: APID 18 is decodable GPS receiver telemetry. It gives the real date and an accurate clock for all other APIDs, but no spacecraft position.
+
+## APID 0 (time packets and debris)
+
+Explored in `APID_0.ipynb`. Only 27 packets of the 271 472 in the dumps.
+
+- **Virtual channels:** 0, 1, 2, 3 and 7 are real (97.7-100 % of their frames have the same header `0x1E51` bar the channel id, 7 is the idle
+  channel). 4, 5 and 6 have 129 frames in all, almost none with that header: frames with bit errors that got a wrong channel id.
+- **15 packets on virtual channel 5 and 1 on channel 2** (7 bytes, one 2 164 bytes, sequence flags 0, zeros or `0x80` every 9th byte): debris of
+  those frames, not packets.
+- **1 packet of 129 bytes on virtual channel 1** that starts like a housekeeping report: it is an APID 2 report (structure 129 bytes / SID 71)
+  with bit errors in its header (APID field 0, garbage marker and tick, CRC fails), the data from byte 32 reads as sensible float32.
+- **10 time packets**, 15 bytes, on virtual channel 0, one in each of 10 dumps, sequence flags 3: payload `08 2f`, a 4 byte tick counter, a 2 byte
+  fraction (/ 65536), `00`. No secondary header and no CRC. The tick is the counter of the other APIDs and lies inside the time span of
+  its dump, so with the GPS offset from APID 18 they are dated 2025-08-08 to 2025-10-10. The sequence count goes up by one per packet, and
+  against the tick it gives a period of 367.6 s (about 6 min 7.6 s, between 366.7 and 368.5 s per gap, jitter of the packet time).
+- **LYRA / Sun / attitude:** nothing.
+
+Conclusion: APID 0 is a time reference sent every 6 minutes, nothing else in it is real.
