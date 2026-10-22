@@ -3,12 +3,7 @@ name = "proba-2-gif-generator"
 version = "0.1.0"
 description = "Stabilize and color PROBA-2 SWAP imagery and generate GIFs"
 requires-python = ">=3.14"
-dependencies = [
-    "imageio==2.37.0",
-    "imageio-ffmpeg==0.6.0",
-    "numpy==2.2.6",
-    "opencv-python==4.12.0.88",
-]
+dependencies = []
 
 [dependency-groups]
 dev = [

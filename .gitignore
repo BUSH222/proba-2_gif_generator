@@ -3,6 +3,7 @@
 *.jpg
 
 tests/
+cadus/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
