@@ -1,98 +1,208 @@
 # Experimental environment
 Extracting the scientific and calibration data of PROBA-2 from the CADU dumps in `cadus/`.
 
+- **SWAP: fully decoded.** APID 20, every byte (see below). The sun center (the "pixel offsets") is not in the
+  telemetry; the calibration pipeline fits it to the limb, and so does `extract_images.py --process`.
 - **LYRA: found.** It is APID 21 (see below).
 - **Other science data to find:** DSLP (Dual segmented Langmuir probe), TPMU (Thermal plasma measurement unit). They should be in the dumps, but they may be degraded and off at times. TPMU (along with DSLP, maybe) should power on at 14:01:03 UTC and off at 16:33:04 during weekdays only. Other reports suggest that it is 210 minutes per weekday, starting at 14:00 UTC. This may be a clue to uncovering the data, since it is very likely to be absent during the weekends.
-- **Next big target: the SWAP pixel offset values**, needed to calibrate the images properly. The metadata of the image packets has no field for
-  them (see "Where the sun center, attitude and position are not").
 
 TODO: APID 22 (8 channels of int16 at 592 Hz, a pulse every 1.75 s) is not LYRA. Check it, and the groups of float32 columns in APID 2, against DSLP/TPMU, start with the date.
-TODO: Look for the SWAP offsets in the APIDs not explored yet, in the later image packets and in the JPEG stream.
 TODO: Check if PROBA-V GPS log format matches PROBA-2's to get more out of APID 18
+TODO: SWAP calibration beyond centering: the fine rotation (`SOLAR_EP` plus SWAP's -0.3 degree mount offset) and the dark
+current, which the pipeline computes from the detector temperature (`TEMP1DET`, "SW HK T CF", not in APID 20; maybe in
+APID 2).
+
+## Usage
+
+```
+python extract_images.py cadus -o images            # the JPEGs, named after the UTC of the start of acquisition
+python extract_images.py cadus -o images --process  # + images/processed/*.png north up and sun centered, centers.csv
+```
+
+`--process` turns each image by the commanded roll (90 degree steps, from `LANG_ROT`), fits the limb (in the spirit of the
+pipeline's `p2sw_imgcor`: a ring correlation, then a circle through the limb maximum on 720 radii), and shifts the sun to
+pixel (511.5, 511.5) with bicubic interpolation. `centers.csv` has the center in the turned image and, as `swxcen`/`swycen`,
+in the archive's level 0 convention: on the 281 images with a level 1 file it is within 1 pixel of the archive's
+`SWXCEN`/`SWYCEN` for 97 % of them and within 2.1 pixels for all, complete or cut. An image whose fit is off the expected
+limb radius is saved turned but not shifted (`fit_ok` False).
 
 ## APID 20 (SWAP images)
 
-All offsets are bytes into the packet payload, i.e. after the 6 byte CCSDS primary header, and all numbers are
-big-endian. `extract_images.py` follows satdump's SWAPReader and `image_rotation.ipynb` is where the metadata is poked at.
-Everything below was measured on the 13 dumps in `cadus/`, 324 images that still have their first packet.
+Explored in `APID_20.ipynb`. The PROBA2 Science Center publishes a level 0 FITS file for every SWAP image
+(`https://proba2.sidc.be/swap/level0/YYYY/MM/DD/swap_lv0_YYYYMMDD_HHMMSS.fits`), made from these packets; 294 of our images
+were matched to theirs (by compressed size and priority) and every field below checked against the FITS keywords. Offsets
+are bytes into the packet payload (after the 6 byte CCSDS primary header), all numbers big-endian.
 
 ### From CADU to packet
 
 The dumps are not randomized and the frames are not Reed-Solomon corrected. `cadu.py` does what satdump's PROBA module
-does with them, and the images that `extract_images.py` writes match satdump's: for `proba2_dump.cadu` it saves the same
-25 images, 24 of them pixel for pixel and one with a difference of at most 1 grey level in 2 % of the pixels.
+does with them.
 
 - A CADU is 1279 bytes: 4 byte sync marker, 1115 byte CCSDS TM transfer frame, 160 bytes of Reed-Solomon parity.
 - The frame is 6 byte header (the last two bytes hold the 11 bit first header pointer, 2047 = no packet starts here), 1103
   bytes of data, 4 bytes OCF and a 2 byte CRC-16 (CCITT, init `0xFFFF`) over the 1113 before it. Virtual channel 3 carries
-  SWAP.
+  the SWAP images.
 - Packets are cut from the data of consecutive frames of a virtual channel. satdump's demuxer (ported in `cadu.py`) ignores
-  the frame counter, so a lost frame is not padded and not noticed: the next frames just continue the open packet. Zero
-  padding the hole instead gets slightly different images in the dumps with lost frames.
-- Taking the CRC (2 bytes) for packet data was the bug that cost us every second packet and put stray bytes in the JPEGs.
+  the frame counter, so a lost frame is not padded and not noticed: the next frames just continue the open packet. Such a
+  packet has the wrong length and fails its CRC (see "Lost packets").
 - The parity is a CCSDS RS(255,223) with interleaving 5, dual basis symbols, field polynomial `0x187` and first root
   `α^(11*112)`. About 3.5 % of the codewords of `proba2_dump.cadu` have errors, mostly 1-2 symbols. `rs.py` corrects them
-  and `iter_packets(path, correct_errors=True)` uses it, but satdump doesn't, so it is off.
+  and `iter_packets(path, correct_errors=True)` uses it, but it gives no more intact images (225 either way): it drops the
+  frames it can't correct, and the demuxer then glues the packets around the hole. So it is off.
 
-### Packet types
+### Packet kinds
 
-- **Image packets**, up to 65536 bytes. An image is 12 of them in 266 of the 324 images (the others lost packets), all sharing the time stamp in payload bytes 0-5. Each
-  starts with a 14 byte secondary header, the very first one is followed by a 78 byte metadata block, and then the
-  progressive JPEG data follows (`FF D8` at offset 92 of the first packet).
-- **Housekeeping packets**, 22-24 bytes, evenly spaced in time. Layout: `10 05 01 00`, a time stamp, the constant `0x012c`
-  (300) and 2 bytes that look random. These carry a garbage day count in bytes 0-1 and are ignored when counting images.
+All 4 615 packets have packet id `0x0814` (one has a bit error), sequence flags 3, and end in a CRC-16/CCITT (init `0xFFFF`)
+over the rest of the packet.
 
-### Metadata of the first image packet
+| Kind | Virtual channel | Length | Payload starts | Count (CRC ok) |
+|---|---|---|---|---|
+| Image packet | 3 | 65 536, the last of an image less | `01` + time stamp | 4 214 (3 760) |
+| PUS 5/1 event report | 1, 2 | 22 | `10 05 01` | 367 (367) |
+| PUS 1/1 and 1/7 telecommand verification | 1, 2 | 24 | `10 01 01`, `10 01 07` | 27 (27) |
+| Debris | | | | 7 (0) |
 
-| Offset | Size | Meaning | Status |
-|---|---|---|---|
-| 0-5 | 6 | Image time stamp: `0x010d` days + 32 bit milliseconds (satdump adds 18630 days and 4 h to this) | known, taken from satdump |
-| 6 | 1 | Fraction of the time stamp (the only byte of 6-7 that changes) | guessed, byte 7 is always 0 |
-| 8-13 | 6 | A second, earlier time stamp, about 3.5 s before the first one (assuming milliseconds) | unknown, exposure start? |
-| 14-21 | 8 | The image time stamp again, with a `00` where the first copy has `01` | known |
-| 22 | 1 | `0x02` in every image | unknown |
-| 23-30 | 8 | Float64 which is only ever `1.0`, `0.0` or `±0.7071067819` | see below |
-| 31-47 | 17 | Zeros, bar a constant `01` at 47 | unknown, probably unused |
-| 48-51 | 4 | `10` | unknown |
-| 52-59 | 8 | `1023`, `1023` | window of the image, 1024 x 1024 pixels |
-| 60-74 | 15 | Constants: `3b 00 00 00 04 0b 01 01 0e 10 00 0a 00 01 00` (includes `0x0e10` = 3600 and `0x0a` = 10) | unknown |
-| 75 | 1 | One of 100, 101, 103, 110, 120, 130 | unknown, constant over runs of consecutive images |
-| 76-79 | 4 | About 733 000-750 000, changes from image to image | unknown, see below |
-| 80-87 | 8 | Zeros | unknown, probably unused |
-| 88-91 | 4 | The value at 76-79 minus 4 to 19 | unknown |
+- **Event reports** (the "housekeeping packets with 2 random bytes"): `10 05 01`, `00 01`, tick (4), fraction (2), `00`, event id
+  `01 2c` (300), CRC. **The 2 random bytes are the CRC.** One is sent 0.12-0.18 ms after every image is taken, every 110 s
+  (18 s in the eclipse dump), so they log the image times; only about a fifth of the images they report are in our dumps.
+- **Telecommand verification**: the APID 14 layout; the request packet id is `0x1814`, i.e. the commands are sent to APID 20
+  (SWAP). One or two per dump, at no fixed time against the images.
 
-Of all 78 bytes, only the time stamps, offset 23-30, 75, 76-79 and 88-91 differ from image to image. Everything else is
-the same in all but two or three images, which have random bytes everywhere (bit errors, the frames are not corrected).
-There is no room for further per-image values.
+### Image packet
 
-**Orientation (23-30).** On `proba2_dump.cadu` the value matches the rotation of the sun measured by hand on all 12 images:
+| Offset | Size | Content |
+|---|---|---|
+| 0 | 1 | `01` |
+| 1-6 | 6 | End of acquisition: 32 bit tick + 16 bit fraction (/ 65 536). The same in every packet of an image, which identifies it |
+| 7 | 1 | `00` |
+| 8 to the end - 2 | | First packet: the image header (8-91), then the JPEG from 92. The others: JPEG data from 8 |
+| last 2 | 2 | CRC-16/CCITT over the packet |
 
-| Value | Sun rotated clockwise relative to the first image |
-|---|---|
-| -0.7071 | 0 |
-| 1.0 | 90 |
-| 0.7071 | 180 |
-| 0.0 | 270 |
+So every packet carries 65 520 bytes of data from offset 8 (the first one 84 bytes of header and 65 436 of JPEG). From offset 88
+of the first packet on, the data is `SIZCOMPI` bytes: the JPEG length (4), the JPEG, and 0-15 bytes of padding to a multiple of
+16. An image is ceil((80 + `SIZCOMPI`) / 65 520) packets, 12 for all of ours, with consecutive sequence counts.
 
-This is cos(psi/2) of a roll psi in 90 degree steps (with psi = rotation - 90), which would make it the w component of a
-quaternion. That is a fit to four values, and the other dumps have not been measured by hand. Over all dumps the
-flag predicts 98 images at 0, 83 at 90, 54 at 180 and 89 at 270 degrees.
+satdump (and the old `extract_images.py`) took 14 bytes of header from every packet and dropped only the last byte: that loses 6
+JPEG bytes at the start of each following packet and keeps one CRC byte at the end of each. Every one of the 225 intact images
+then gives libjpeg a "Corrupt JPEG data" warning, and a few percent of the pixels are off (2.9 % in the notebook's example), in
+streaks of one block row; cut right, none does.
 
-**76-79 and 88-91.** They move together, between 726 256 and 769 072, and the first is always 4-19 larger than the
-second. Over the 258 complete images they don't correlate with the mean brightness (r = 0.06), the area of the sun disk
-(r = 0.21) or either coordinate of the disk center (|r| <= 0.03; disk found by thresholding a 128 x 128 downsample, so
-that is rough). Whatever they are, they are not the sun position.
+### Image header (first packet, offsets 0-91)
 
-### Where the sun center, attitude and position are not
+The names are the level 0 FITS keywords. "Checked" means the field varies and equals the keyword in all 294 matched images;
+"value" means it is constant in our data and equals the keyword's (constant) value, so its place is inferred from the order of
+the keywords in the FITS header.
 
-The sun center was the obvious candidate for an onboard autonomy parameter, but the metadata above has no field which
-could hold it: the center of the disk moves between images (roughly 470-530 in x and 450-650 in y, measured roughly on the 258 complete
-images), while the only bytes which change are the ones listed, and none of them correlates with it. No position or
-attitude vector fits either. The rest of the metadata is constant.
-The F4/F6 text records in APID 18 are the only position-like numbers found so far (see `find_apids.ipynb`).
+| Offset | Size | Keyword | FITS comment | Our data | Status |
+|---|---|---|---|---|---|
+| 0 | 1 | | | `01` | framing |
+| 1-6 | 6 | `EACQTIME` | OBET end acquisition time | tick + fraction | checked |
+| 7 | 1 | | | `00` | framing |
+| 8-13 | 6 | `SACQTIME` | OBET start acquisition time | 13.9 s before the end | checked |
+| 14 | 1 | | | `00` | framing |
+| 15-20 | 6 | `TRANTIME` | OBET transferring time | = `EACQTIME` | checked |
+| 21 | 1 | | | `00` | framing |
+| 22 | 1 | `OBS_MODE` | sun_cen, fix_off, var_off, cme_track | 2 = Variable off-pointing | value |
+| 23-30 | 8 | `LANG_ROT` | commanded large angle rotation component | float64: 0, ±0.7071067819, 1 | checked |
+| 31-38 | 8 | `PAV_ROT0` | commanded paving rotation component 0 | float64 0 | value |
+| 39-46 | 8 | `PAV_ROT1` | commanded paving rotation component 1 | float64 0 | value |
+| 47 | 1 | `CAP_MODE` | (DS,CDS) capture mode | 1 = CDS | value |
+| 48-51 | 4 | `EXPTIME` | [s] commanded exposure time | 10 | value |
+| 52-53 | 2 | `FIRSTROW` - 1 | first read-out detector row | 0 | value |
+| 54-55 | 2 | `LAST_ROW` - 1 | last read-out detector row | 1023 | value |
+| 56-57 | 2 | `FIRSTCOL` - 1 | first read-out detector column | 0 | value |
+| 58-59 | 2 | `LAST_COL` - 1 | last read-out detector column | 1023 | value |
+| 60 | 1 | `PGA_OFFS` | PGA offset | 59 | value |
+| 61-63 | 3 | `PGA_GAIN`?, `LED_POW`?, `LED_SEL`? | (FITS: 1, off, a) | `00 00 00` | not pinned down |
+| 64 | 1 | `HASBLACK` | HAS detector black level | 4 | value |
+| 65 | 1 | `HASOFFST` | HAS detector offset level | 11 | value |
+| 66 | 1 | `ARTEFX` | (off,on,cosmic rays) on-board artefact removal | 1 = on | value |
+| 67 | 1 | `RECODING` | (off,fixed,adaptive) on-board recoding | 1 = fixed | value |
+| 68-69 | 2 | `RECNUM` | recoding upper limit | 3600 | value |
+| 70-71 | 2 | `RECBIAS` | recoding lower limit | 10 | value |
+| 72-73 | 2 | `COMPRESS`? `REBIN`? | (FITS: jpeg, off) | `00 01` | not pinned down |
+| 74 | 1 | `LZWDECOR` | LZW decorrelation | 0 = off | value |
+| 75 | 1 | `PN` | on-board priority number | 100-130 | checked |
+| 76-79 | 4 | `SIZCOMPI` | size of on-board compressed image | 726 256-769 072 | checked |
+| 80-83 | 4 | `NPRESCR` | # preserved pixels - cosmic rays | 0 | value |
+| 84-87 | 4 | `NPRESLZW` | # preserved pixels - LZW decorrelation | 0 | value |
+| 88-91 | 4 | | JPEG length, SOI to EOI (not in the FITS) | `SIZCOMPI` - 4 - padding | checked against the JPEG |
 
-Still to look at: the secondary headers of the later image packets, the housekeeping packets, the other APIDs (2 and 22 are done, see
-below) and the JPEG stream itself.
+`HASSTDBY` and `READRDIV` (both 0) have no place of their own; they may be among the zeros of 61-63. The rest of the level 0
+header (`DATE-OBS`, attitude `P2_X0`/`P2_Y0`/`P2_ROLL`, the CD matrix and `CROTA`, the orbit, `TEMP1DET`/`TEMP2DET`, `DTPLAR1/2`)
+comes from other spacecraft telemetry on the ground. Notes:
+
+- **The earlier reading of 0-5 as `0x010d` days + 32 bit milliseconds was wrong.** Byte 0 is the `01`, bytes 1-4 the tick (the counter
+  of APIDs 0, 2, 18, 21 and 22) and 5-6 its fraction. The "milliseconds" were tick x 256 + fraction / 256, which advance 0.256 s
+  per second: that was the "SWAP clock runs slow by 0.256" (APID 18).
+- **Time stamps.** The archive's OBET counts are these 48 bit stamps / 4 + 2^42, exactly.
+- **Detector offsets.** `PGA_OFFS`, `HASBLACK` and `HASOFFST` are the electronic offset settings of the detector; they never
+  changed over the two months of dumps.
+- **`PN`** (100, 101, 102, 103, 110, 120, 130) comes in runs (130 for a dozen images, 110 / 120 alternating): it ranks the images
+  for downlink, and has nothing to do with the image itself.
+- **`SIZCOMPI`** is the JPEG length + 4, rounded up to a multiple of 16, in all intact images.
+
+### Roll (`LANG_ROT`)
+
+`LANG_ROT` is sin(roll / 2) of the commanded roll about the line of sight (the vector part of its quaternion), matching `P2_ROLL`
+of the archive in every matched image. `np.rot90(jpeg, k)` turns an image north up (ecliptic north; checked against level 1 images,
+which are rotated to solar north):
+
+| `LANG_ROT` | `P2_ROLL` | `CROTA1` | k for `np.rot90(jpeg, k)` | Sun as seen, relative to roll 270 (by hand) |
+|---|---|---|---|---|
+| -0.7071 | 270 | 0 | 0 | 0 |
+| 1.0 | 180 | 90 | 1 | turned 90 clockwise |
+| 0.7071 | 90 | 180 | 2 | 180 |
+| 0.0 | 0 | 270 | 3 | turned 270 clockwise |
+
+k = -(roll + 90) / 90 mod 4, with roll = 2 asin(`LANG_ROT`). The pipeline then rotates by `SOLAR_EP` (ecliptic to solar north,
+3-7 degrees) and a fixed SWAP mount offset of -0.3 degrees.
+
+### JPEG stream
+
+Standard libjpeg output, the same in every image: JFIF APP0 (1.1, no thumbnail), one quantization table of 64 ones (quality 100),
+SOF2 (progressive, 8 bit, 1024 x 1024, one component), DRI of 128 MCUs (one block row), and 6 scans in libjpeg's default
+progression for one component, each with its own optimized Huffman table. **No COM or other APP segments.** After the EOI come
+0-15 bytes of padding, leftovers of the buffer (often the bytes of the image before). Nothing else is in the stream.
+
+### Pixel values
+
+The level 0 image is our JPEG flipped up-down (FITS row 1 is the last JPEG row), with each grey level replaced by a detector value:
+0 -> 10 DN (`RECBIAS`), 255 -> 3588 DN (just under `RECNUM`), in steps of 1, 3, 5 ... 27 DN per grey level (a piecewise linear
+square root, the on-board "fixed recoding", reconstructed at the bin centres). 98.7 % of the pixels sit on that table, the rest
+one grey level off (IDCT rounding). The table is `RECODE_TABLE` in `extract_images.py`.
+
+### Time
+
+- `DATE-OBS` of the archive is the start of acquisition (8-13): it follows it to 2 ms, the end to 22 ms.
+- The tick is not exactly a GPS second: per dump, GPS minus tick (from the F4 records of APID 18) grows by 1.064 s a day, from
+  1 209 613 880.9 s on 2025-08-08 to 896.8 on 08-23 and 947.3 on 10-09 (with a step of -1.2 s between 2025-10-09 and 10-10), so the
+  single `GPS_MINUS_TICK` of the notebooks is off by up to ±11 s in August and about 56 s in October.
+- `extract_images.py` takes the median GPS minus tick of the dump, plus 1.064 s a day from there, minus 18 leap seconds: the start
+  times then agree with `DATE-OBS` to a median of 0.08 s in 13 of the 14 dumps, and 266 of 303 file names are the archive's own.
+  `proba2_dump.cadu` is 1.78 s off: its images are older than the clock step above.
+
+### Lost packets
+
+Of the 403 images (distinct time stamps), 329 have their first packet and 225 are complete with every packet passing the CRC. A
+missing packet can't be skipped (the JPEG data runs on), and a packet glued together across lost frames (wrong length) is garbage
+whose stray markers can wreck the whole decode. Cutting the stream at the first missing or wrong-length packet and ending it with
+an EOI works best: the JPEG is progressive, so the first packets already hold the whole image at lower quality (the first ~14 kB
+are the DC scan, the first 56 kB the coarse AC). Against the archive's complete versions (25 images with missing packets) this is
+as good as gluing the packets together or better, by up to 20 % less residual when the gap is early, and the sun center fits
+as well as on complete images. Packets that only fail the CRC (bit errors, right length) are kept: over 85 damaged images that is
+better than cutting at them in 12, worse in 1, the same in 71, but once it wrecks the decode, and then `extract_images.py` cuts at
+the first bad CRC instead. This saves 328 images (226 complete, 102 cut).
+
+### Sun center
+
+Not in APID 20 and not in level 0 either: `CRPIX1/2 = 512.5` and `CRVAL1/2 = 0` ("level < 1: unknown") in every file. The pipeline
+(`p2sw_prep.pro`, `p2sw_imgcor.pro` in SolarSoft, `$SSW/proba2/swap/idl/prep/`) finds it by cross-correlating the median filtered
+image with a ring of radius `RSUN_ARC / CDELT1` ± 3 pixels and refining with `p2sw_fit_limb.pro` on the limb maximum, and writes
+it to level 1 as `SWXCEN`/`SWYCEN`. Those move by about ±40 pixels (461-545), with means differing by up to 20 pixels between roll
+states; the spacecraft yaw and pitch (`P2_X0`/`P2_Y0`, attitude telemetry) explain only part of it. A limb fit on our JPEGs
+(`APID_20.ipynb`, section 10, and `extract_images.py --process`) reproduces `SWXCEN`/`SWYCEN` to a median of 0.1-0.15 pixel. The
+limb at 17.4 nm is about 2 pixels outside the photospheric radius.
 
 ## APID 21 (LYRA raw data)
 
@@ -176,8 +286,8 @@ Offsets here are bytes into the whole packet, including the 6 byte primary heade
   are 104 bytes / SID 30 (2 101 reports), 61 / 55 (2 042), 292 / 100 (1 199) and 132 / 0 (900).
 - **Time:** the counter grows by a fixed step per layout, 2 ticks for 292 / 100, 5 for 132 / 0, 10 for 61 / 55 and 104 / 30, up to
   250 for the slow ones. One tick is one second (see APID 18: it runs together with the GPS time). So the reports come every 2 s to
-  about 4 minutes. A first calibration against the SWAP timestamps gave 0.256 s per tick; that was wrong, the SWAP timestamps are what
-  runs slow (see APID 18).
+  about 4 minutes. A first calibration against the SWAP timestamps gave 0.256 s per tick; that was wrong, the SWAP timestamps were
+  misread (see APID 20).
 - **Losses:** 97.8 % of the sequence count steps are 1.
 - **Float columns:** several layouts have groups of 4-7 float32 columns whose changes are correlated (for example offsets 62-90 of 292 / 1). Not identified;
   a candidate to check against DSLP/TPMU.
@@ -230,9 +340,10 @@ Explored in `APID_18.ipynb`. 5 025 packets, 4 466 on virtual channel 2. Same pac
   same satellite (1 / L1 wavelength = 5.2550), and the change of the range divided by the range rate is 10.00 s, the 10 ticks between the
   records.
 - **Time:** the week and second give GPS dates in August to October 2025 (the 13 dumps span about 2 months), and the GPS time runs at
-  1.0000 s per tick across all files. So the tick counter of APIDs 2, 22 and 18 is in seconds. The SWAP times of `extract_images.py`
-  (2021-10-31 to 2021-11-16) advance only 0.256 s per GPS second between the files, so they are wrong in date and scale (suspects:
-  satdump's day offset 18630 and the unit of the 32 bit field). The image file names are affected.
+  1.0000 s per tick across all files (to 4 digits: per dump, GPS minus tick grows by 1.064 s a day, see APID 20, "Time"). So the tick
+  counter of APIDs 2, 22 and 18 is in seconds. The SWAP times the old `extract_images.py` took from satdump (2021-10-31 to
+  2021-11-16) advanced only 0.256 s per GPS second between the files: they were a misreading of the SWAP time stamp, which is the
+  same tick (see APID 20). Fixed; the image files are now named after the UTC of the start of acquisition.
 - **Position:** none. F4 and F6 have time and raw satellite measurements only; a position needs the satellite ephemerides, which are not in
   these records (they could come from the navigation message elsewhere, or from a public ephemeris for these dates).
 - **Sun / attitude:** nothing.

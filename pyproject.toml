@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Stabilize and color PROBA-2 SWAP imagery and generate GIFs"
 requires-python = ">=3.14"
 dependencies = [
+    "imageio>=2.37",
+    "imageio-ffmpeg>=0.6",
     "ipykernel>=7.4.0",
     "matplotlib>=3.11.2",
     "numpy>=2.5.4",
