@@ -11,12 +11,14 @@ dependencies = [
     "numpy>=2.5.4",
     "pandas>=3.1.0",
     "pillow>=13.0.0",
+    "scipy>=1.18.1",
     "sunpy[net,timeseries,visualization]>=8.0.1",
 ]
 
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
     "ruff>=0.16.5",
     "ty>=0.0.78",
 ]
@@ -58,6 +60,7 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 python_files = "test_*.py"
 python_functions = "test_*"
 

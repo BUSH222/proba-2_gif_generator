@@ -5,7 +5,17 @@
 tests/
 cadus/
 images/
+SWAP_pro/
 satdump_processed_img/
+swap_caldb/
+swap_objects/
+swap_prep/
+swap_tools/
+
+
+lyra/
+swap_archive/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -167,5 +177,3 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
-lyra/
-swap_archive/

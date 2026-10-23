@@ -13,22 +13,31 @@ With --process every image is also turned north up (90 degree steps, from the co
 center is found by fitting the limb, and it is shifted to put the sun in the middle. These go to `<out>/processed/` as
 PNG, with the centers in `centers.csv`.
 
-With --gif all the images are also stitched, in time order, into `<out>/swap.gif`: the processed ones with --process,
-the JPEGs as they came down otherwise. --mp4 does the same into `<out>/swap.mp4`.
+With --level1 every image also goes through the archive's calibration pipeline (`p2sw_prep.py`, a port of SolarSoft's
+p2sw_prep.pro): dark current, flat field, bad and unread pixels, despiking, then sun centered, square pixels and solar
+north up in one interpolation, in DN/s. These go to `<out>/level1/` as level 1 FITS files, with PNG previews in the
+SWAP team's scaling.
+
+With --gif all the images are also stitched, in time order, into `<out>/swap.gif`: the level 1 ones with --level1, the
+processed ones with --process, the JPEGs as they came down otherwise. --mp4 does the same into `<out>/swap.mp4`.
 """
 
 import argparse
 import binascii
+import bisect
 import csv
 import io
 import math
+import os
 import struct
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+from astropy.io import fits
 from PIL import Image as PILImage
 from PIL import ImageFile
 
@@ -108,6 +117,7 @@ class ImageHeader:
     obs_mode: int  # 22, OBS_MODE: 0 sun centered, 1 fixed off-pointing, 2 variable off-pointing, 3 CME tracking
     lang_rot: float  # 23-30, LANG_ROT: commanded large angle rotation component, sin(roll / 2)
     pav_rot: tuple[float, float]  # 31-46, PAV_ROT0/1: commanded paving (off-pointing) rotation components
+    capture_mode: int  # 47, CAP_MODE: 0 DS, 1 CDS
     exposure: int  # 48-51, EXPTIME (s)
     window: tuple[int, int, int, int]  # 52-59: first row, last row, first column, last column (0-based)
     priority: int  # 75, PN
@@ -128,6 +138,7 @@ class ImageHeader:
             obs_mode=payload[22],
             lang_rot=f64(23),
             pav_rot=(f64(31), f64(39)),
+            capture_mode=payload[47],
             exposure=u(48, 4),
             window=(u(52, 2), u(54, 2), u(56, 2), u(58, 2)),
             priority=payload[75],
@@ -433,6 +444,216 @@ def process(pixels: np.ndarray, header: ImageHeader, start: datetime) -> tuple[n
     return (center_sun(turned, fit.x, fit.y) if fit.ok else turned), row
 
 
+# Level 1: the archive's calibration pipeline (p2sw_prep.py, a port of SolarSoft's p2sw_prep.pro) on our images. They
+# get the level 0 header the ground would give them: the fields of the image header, the pointing from LANG_ROT, the
+# ephemeris computed from the date. The detector temperature (for the dark current) and the LAR timing are not in our
+# telemetry: they come from the archive's level 0 header of the same image if one is given (--archive-headers), and
+# otherwise the temperature is DETECTOR_TEMP and images taken during a LAR are not caught.
+LEVEL1_DIR = "level1"
+CDELT = (3.1646941, 3.1760467)  # arcsec per pixel along x and y (CDELT1/2 of the archive; the pixels aren't square)
+ARCHIVE_SOLAR_RADIUS = 696_000.0  # km: the archive's RSUN_ARC uses it (sunpy's default is 695 700)
+DETECTOR_TEMP = -0.73  # deg C: median TEMPDARK of the archive's 281 level 1 files of Aug-Oct 2025 (-1.3 to +1.5)
+LEVEL1_WORKERS = max(1, (os.cpu_count() or 2) // 2)  # ~1 GB each at the peak: all the cores would swap
+ARCHIVE_MATCH = 1.0  # s: largest difference of DATE-OBS for an archive header to be the same image
+OBS_MODES = {0: "Sun centered", 1: "Fixed off-pointing", 2: "Variable off-pointing", 3: "CME tracking"}
+TELEMETRY_KEYS = (  # taken from the archive's header of the same image when there is one
+    *("TEMP1DET", "TEMP2DET", "TTEMP1", "TTEMP2", "DTPLAR1", "DTPLAR2"),
+    *("P2_X0", "P2_Y0", "P2_ROLL", "SOLAR_EP", "RSUN_ARC"),
+)
+
+
+def solar_ep(time: datetime) -> float:
+    """Angle from ecliptic north to solar north as seen from the Earth, in degrees (SOLAR_EP of the archive, which
+    this reproduces to 0.001 degree)."""
+    import astropy.units as u
+    from astropy.coordinates import GeocentricTrueEcliptic, SkyCoord
+    from astropy.time import Time
+    from sunpy.coordinates import frames, get_earth
+
+    t = Time(time)
+    view = frames.Helioprojective(observer=get_earth(t), obstime=t)
+    pole = SkyCoord(0 * u.deg, 90 * u.deg, radius=695_700 * u.km, frame=frames.HeliographicStonyhurst, obstime=t)
+    ecliptic = GeocentricTrueEcliptic(equinox=t, obstime=t)
+    sun = SkyCoord(0 * u.arcsec, 0 * u.arcsec, frame=view).transform_to(ecliptic)
+    north = SkyCoord(sun.lon, sun.lat + 0.1 * u.deg, distance=sun.distance, frame=ecliptic)
+
+    def position_angle(point: SkyCoord) -> float:
+        on_sky = point.transform_to(view)
+        return math.degrees(math.atan2(-on_sky.Tx.to_value(u.arcsec), on_sky.Ty.to_value(u.arcsec)))
+
+    return (position_angle(north) - position_angle(pole)) % 360
+
+
+def rsun_arc(time: datetime) -> float:
+    """Angular radius of the photosphere from the Earth, in arcsec, as the archive computes it (RSUN_ARC)."""
+    from sunpy.coordinates import sun
+
+    distance = float(sun.earth_distance(time).to_value("km"))
+    return math.degrees(math.asin(ARCHIVE_SOLAR_RADIUS / distance)) * 3600
+
+
+def load_archive_headers(folder: Path) -> list[tuple[datetime, fits.Header]]:
+    """The level 0 headers of the archive in a folder (FITS files, or headers saved alone), by DATE-OBS."""
+    headers = []
+    for path in sorted(folder.iterdir()):
+        if path.suffix.lower() in (".fits", ".fts"):
+            header = fits.getheader(path)
+        elif path.suffix.lower() == ".hdr":
+            raw = path.read_bytes()
+            end = raw.find(b"END" + b" " * 77)
+            header = fits.Header.fromstring(raw[: end + 80].decode("latin1")) if end >= 0 else None
+        else:
+            continue
+        if header is not None and header.get("LEVEL") == 0 and "DATE-OBS" in header:
+            headers.append((datetime.fromisoformat(header["DATE-OBS"]).replace(tzinfo=UTC), header))
+    return sorted(headers, key=lambda item: item[0])
+
+
+def find_archive_header(headers: list[tuple[datetime, fits.Header]], start: datetime) -> fits.Header | None:
+    """The archive header of the image that started at this time, if there is one."""
+    index = bisect.bisect_left(headers, start, key=lambda item: item[0])
+    near = [headers[i] for i in (index - 1, index) if 0 <= i < len(headers)]
+    best = min(near, key=lambda item: abs((item[0] - start).total_seconds()), default=None)
+    return best[1] if best and abs((best[0] - start).total_seconds()) <= ARCHIVE_MATCH else None
+
+
+def level0(
+    pixels: np.ndarray,
+    header: ImageHeader,
+    start: datetime,
+    telemetry: fits.Header | None = None,
+    detector_temp: float = DETECTOR_TEMP,
+) -> tuple[np.ndarray, fits.Header]:
+    """The level 0 image (detector values, FITS orientation) and header of a JPEG, as the archive's level 0 file."""
+    image = np.flipud(RECODE_TABLE[pixels]).astype(np.int16)  # FITS row 1 is the last JPEG row
+    roll = header.roll or 0
+    crota = (270 - roll) % 360  # the archive's CROTA1 for each commanded roll
+    cos, sin = round(math.cos(math.radians(crota))), round(math.sin(math.radians(crota)))
+    first_row, last_row, first_col, last_col = header.window
+    date_obs = start.replace(tzinfo=None).isoformat(timespec="milliseconds")
+    fits_header = fits.Header()
+    for key, value, comment in (
+        ("DATE-OBS", date_obs, "UTC time of observation"),
+        ("LEVEL", 0, "data processing level"),
+        ("TELESCOP", "PROBA2", "satellite name"),
+        ("INSTRUME", "SWAP", "instrument name"),
+        ("WAVELNTH", 174, "[Angstrom] bandpass peak response"),
+        ("OBS_MODE", OBS_MODES.get(header.obs_mode, str(header.obs_mode)), "sun_cen, fix_off, var_off, cme_track"),
+        ("CAP_MODE", "CDS" if header.capture_mode == 1 else "DS", "(DS,CDS) capture mode"),
+        ("EXPTIME", float(header.exposure), "[s] commanded exposure time"),
+        ("BUNIT", "DN", "unit of physical value"),
+        ("DATAMIN", float(image.min()), "minimum valid physical value"),
+        ("DATAMAX", float(image.max()), "maximum valid physical value"),
+        ("FIRSTROW", first_row + 1, "first read-out detector row"),
+        ("LAST_ROW", last_row + 1, "last  read-out detector row"),
+        ("FIRSTCOL", first_col + 1, "first read-out detector column"),
+        ("LAST_COL", last_col + 1, "last  read-out detector column"),
+        ("REBIN", "off", "on-board rebin (2x2 pixel average)"),
+        ("WCSNAME", "Helioprojective-cartesian", "level < 1: aligned with ecliptic North"),
+        ("CTYPE1", "HPLN-TAN", "WCS axis X"),
+        ("CTYPE2", "HPLT-TAN", "WCS axis Y"),
+        ("CUNIT1", "arcsec", "WCS axis X units"),
+        ("CUNIT2", "arcsec", "WCS axis Y units"),
+        ("CD1_1", CDELT[0] * cos, "WCS coordinate description matrix"),
+        ("CD1_2", -CDELT[1] * sin, "WCS coordinate description matrix"),
+        ("CD2_1", CDELT[0] * sin, "WCS coordinate description matrix"),
+        ("CD2_2", CDELT[1] * cos, "WCS coordinate description matrix"),
+        ("CDELT1", CDELT[0], "[arcsec] average pixel scale along axis 1"),
+        ("CDELT2", CDELT[1], "[arcsec] average pixel scale along axis 2"),
+        ("CRVAL1", 0.0, "[arcsec] level < 1: unknown"),
+        ("CRVAL2", 0.0, "[arcsec] level < 1: unknown"),
+        ("CRPIX1", 512.5, "[pixel] reference point axis 1"),
+        ("CRPIX2", 512.5, "[pixel] reference point axis 2"),
+        ("CROTA1", float(crota), "[deg] axis 1 to WCS rotation angle"),
+        ("CROTA2", float(crota), "[deg] axis 2 to WCS rotation angle"),
+        ("SOLAR_EP", solar_ep(start), "[deg] s/c ecliptic North to solar North angle"),
+        ("RSUN_ARC", rsun_arc(start), "[arcsec] photospheric solar radius"),
+        ("TEMP1DET", detector_temp, "[Celsius] detector temperature (assumed)"),
+        ("TEMP2DET", detector_temp, "[Celsius] detector temperature (assumed)"),
+        ("TTEMP1", date_obs, "UTC time of detector temp 1st sample"),
+        ("TTEMP2", date_obs, "UTC time of detector temp 2nd sample"),
+        ("SACQTIME", header.start // 4 + 2**42, "[ct] OBET start acquisition time"),
+        ("EACQTIME", header.end // 4 + 2**42, "[ct] OBET end   acquisition time"),
+        ("LANG_ROT", header.lang_rot, "commanded large angle rotation component"),
+        ("PAV_ROT0", header.pav_rot[0], "commanded paving rotation component 0"),
+        ("PAV_ROT1", header.pav_rot[1], "commanded paving rotation component 1"),
+        ("PGA_GAIN", 1, "PGA gain"),
+        ("LED_POW", "off", "calibration LED power"),
+        ("RECODING", "fixed", "(off,fixed,adaptive) on-board recoding"),
+        ("COMPRESS", "jpeg", "(off,lzw,jpeg) on-board compression algorithm"),
+        ("PN", header.priority, "on-board priority number"),
+        ("SIZCOMPI", header.compressed_size, "size of on-board compressed image"),
+        ("NPRESCR", 0, "# preserved pixels - cosmic rays"),
+    ):
+        fits_header[key] = (value, comment)
+    if telemetry is not None:
+        for key in TELEMETRY_KEYS:
+            if key in telemetry:
+                fits_header.set(key, telemetry[key], telemetry.comments[key])
+        fits_header.add_history(f"Telemetry from the archive's {telemetry.get('FILENAME', 'level 0 header')}")
+    else:
+        fits_header.add_history(f"No telemetry: detector temperature assumed {detector_temp} C, LAR timing unknown")
+    return image, fits_header
+
+
+@dataclass
+class Level1Job:
+    pixels: np.ndarray
+    header: ImageHeader
+    start: datetime
+    telemetry: fits.Header | None
+    detector_temp: float
+    folder: Path
+    name: str
+    write_fits: bool = True  # the level 1 FITS file next to the PNG preview
+    scaling: str = "quicklook"  # of the PNG: "quicklook" (the P2SC's quicklooks and movies) or "p2sw" (p2sw_write_png)
+
+
+def make_level1(job: Level1Job) -> tuple[Path | None, np.ndarray | None, str]:
+    """Run the pipeline on one image: (FITS file, or the PNG without write_fits; display frame; note), or
+    (None, None, why not)."""
+    import p2sw_prep
+
+    image, header = level0(job.pixels, job.header, job.start, job.telemetry, job.detector_temp)
+    try:
+        level1, header1 = p2sw_prep.prep(image, header)
+    except p2sw_prep.PrepError as error:
+        return None, None, f"no level 1: {error}"
+    path = job.folder / f"{job.name}.fits"
+    if job.write_fits:
+        p2sw_prep.write_level1(path, level1, header1)
+    frame = np.flipud(p2sw_prep.SCALINGS[job.scaling](level1))
+    PILImage.fromarray(frame).save(path.with_suffix(".png"))
+    path = path if job.write_fits else path.with_suffix(".png")
+    source = "archive telemetry" if job.telemetry is not None else f"assumed {job.detector_temp} C"
+    return path, frame, f"sun at ({header1['SWXCEN']}, {header1['SWYCEN']}), dark at {source}"
+
+
+def make_aligned(job: Level1Job) -> tuple[Path | None, np.ndarray | None, str]:
+    """Only the geometry of the pipeline (p2sw_imgcor) on one image, without its calibration: the JPEG's own grey
+    levels, turned by the commanded roll (90 degree steps), the sun center found by the pipeline's limb fit (on the
+    detector values), then the -0.3 degree mount offset and ecliptic -> solar north (SOLAR_EP) rotations, the pixels
+    made square and the sun put at the center, all in one cubic interpolation. (PNG, frame, note) or (None, None,
+    why not)."""
+    from dataclasses import replace
+
+    import p2sw_prep
+
+    image, header = level0(job.pixels, job.header, job.start, job.telemetry, job.detector_temp)
+    opts = p2sw_prep.Options()
+    try:
+        header = p2sw_prep.p2sw_hdrchk(header, opts)  # refuses LAR images if the archive's header says so
+    except p2sw_prep.PrepError as error:
+        return None, None, f"not aligned: {error}"
+    x, y = p2sw_prep.find_sun_center(header, image.astype(np.float32))
+    grey = np.flipud(job.pixels).astype(np.float32)  # FITS orientation, like the level 0 image
+    aligned = p2sw_prep.p2sw_imgcor(header, grey, replace(opts, sun_cen_x=x, sun_cen_y=y))
+    frame = np.flipud(np.clip(np.round(aligned), 0, 255).astype(np.uint8))
+    path = job.folder / f"{job.name}.png"
+    PILImage.fromarray(frame).save(path)
+    return path, frame, f"sun at ({x + 1:.2f}, {y + 1:.2f}), roll {job.header.roll}, solar_ep {header['SOLAR_EP']:.2f}"
+
+
 def same_size(frames: list[np.ndarray]) -> list[PILImage.Image]:
     """Frames as PIL images; those of another size than the first are resized to it."""
     first = PILImage.fromarray(frames[0])
@@ -469,14 +690,35 @@ def main() -> int:
         help="also save the images turned north up and with the sun centered by limb fitting, in <out>/processed",
     )
     parser.add_argument(
+        "--level1",
+        action="store_true",
+        help=f"also make level 1 FITS files (and PNG previews) with the archive's calibration pipeline, in "
+        f"<out>/{LEVEL1_DIR}",
+    )
+    parser.add_argument(
+        "--archive-headers",
+        type=Path,
+        help="folder of the archive's level 0 headers or FITS files: with --level1, their detector temperature and "
+        "LAR timing are used for the same images",
+    )
+    parser.add_argument(
+        "--detector-temp",
+        type=float,
+        default=DETECTOR_TEMP,
+        help=f"with --level1, the detector temperature (C) for the dark current of images without an archive header "
+        f"(default: {DETECTOR_TEMP})",
+    )
+    parser.add_argument(
         "--gif",
         action="store_true",
-        help=f"also stitch all the images, in time order, into <out>/{GIF_NAME} (the processed ones with --process)",
+        help=f"also stitch all the images, in time order, into <out>/{GIF_NAME} (the level 1 ones with --level1, "
+        "else the processed ones with --process)",
     )
     parser.add_argument(
         "--mp4",
         action="store_true",
-        help=f"also render all the images, in time order, as <out>/{MP4_NAME} (the processed ones with --process)",
+        help=f"also render all the images, in time order, as <out>/{MP4_NAME} (the level 1 ones with --level1, else "
+        "the processed ones with --process)",
     )
     args = parser.parse_args()
 
@@ -487,10 +729,15 @@ def main() -> int:
     images, clocks = collect(cadu_files)
     args.out_path.mkdir(parents=True, exist_ok=True)
     processed_dir = args.out_path / "processed"
+    level1_dir = args.out_path / LEVEL1_DIR
     rows: list[dict[str, object]] = []
     frames: list[np.ndarray] = []
+    jobs: list[Level1Job] = []
     if args.process:
         processed_dir.mkdir(exist_ok=True)
+    archive = load_archive_headers(args.archive_headers) if args.level1 and args.archive_headers else []
+    if args.level1:
+        level1_dir.mkdir(exist_ok=True)
 
     saved = skipped = 0
     for _, image in sorted(images.items()):
@@ -510,6 +757,13 @@ def main() -> int:
         notes = [state] + ([f"{assembled.bad_crc} with bit errors"] if assembled.bad_crc else [])
         notes += [] if assembled.header_ok else ["header has bit errors"]
 
+        if args.level1:
+            telemetry = find_archive_header(archive, start)
+            name = base = "swap_lv1_" + start.strftime("%Y%m%d_%H%M%S")
+            while name in {job.name for job in jobs}:  # two images in the same second
+                name = f"{base}-{sum(job.name.startswith(base) for job in jobs)}"
+            jobs.append(Level1Job(pixels, assembled.header, start, telemetry, args.detector_temp, level1_dir, name))
+
         if args.process:
             centered, row = process(pixels, assembled.header, start)
             PILImage.fromarray(centered).save(processed_dir / f"{path.stem}.png")
@@ -520,11 +774,22 @@ def main() -> int:
             notes.append(f"roll {row['roll']}, {fit}")
             pixels = centered
 
-        if args.gif or args.mp4:
+        if (args.gif or args.mp4) and not args.level1:
             frames.append(pixels)
 
         print(f"{path} ({', '.join(notes)})")
         saved += 1
+
+    if jobs:  # the pipeline takes a few seconds per image: run them side by side
+        made = 0
+        with ProcessPoolExecutor(max_workers=LEVEL1_WORKERS) as pool:
+            for job, (fits_path, frame, note) in zip(jobs, pool.map(make_level1, jobs), strict=True):
+                print(f"{fits_path or level1_dir / (job.name + '.fits')} ({note})")
+                if frame is not None:
+                    made += 1
+                    if args.gif or args.mp4:
+                        frames.append(frame)
+        print(f"made {made} level 1 images of {len(jobs)}", file=sys.stderr)
 
     if args.process:
         with (processed_dir / "centers.csv").open("w", newline="") as file:

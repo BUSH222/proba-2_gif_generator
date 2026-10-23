@@ -8,15 +8,19 @@ Extracting the scientific and calibration data of PROBA-2 from the CADU dumps in
 
 TODO: APID 22 (8 channels of int16 at 592 Hz, a pulse every 1.75 s) is not LYRA. Check it, and the groups of float32 columns in APID 2, against DSLP/TPMU, start with the date.
 TODO: Check if PROBA-V GPS log format matches PROBA-2's to get more out of APID 18
-TODO: SWAP calibration beyond centering: the fine rotation (`SOLAR_EP` plus SWAP's -0.3 degree mount offset) and the dark
-current, which the pipeline computes from the detector temperature (`TEMP1DET`, "SW HK T CF", not in APID 20; maybe in
-APID 2).
+TODO: The SWAP detector temperature (`TEMP1DET`, "SW HK T CF", not in APID 20; maybe in APID 2). The level 1 pipeline
+(`p2sw_prep.py`, see "Level 1") needs it for the dark current and takes it from the archive or assumes -0.73 C.
 
 ## Usage
 
 ```
 python extract_images.py cadus -o images            # the JPEGs, named after the UTC of the start of acquisition
 python extract_images.py cadus -o images --process  # + images/processed/*.png north up and sun centered, centers.csv
+python extract_images.py cadus -o images --level1 --archive-headers swap_archive/lv0_headers --gif
+                                                    # + images/level1/*.fits and *.png, calibrated like the archive
+python p2sw_prep.py swap_lv0_*.fits -o level1 --png # the archive's level 0 FITS files -> level 1
+python process_cadu.py cadus/proba2_dump.cadu --gif --mp4  # one dump -> SWAP_pro/*.png calibrated, + animations
+python process_cadu.py cadus/proba2_dump.cadu --raw --gif  # no calibration: raw grey levels, only aligned
 ```
 
 `--process` turns each image by the commanded roll (90 degree steps, from `LANG_ROT`), fits the limb (in the spirit of the
@@ -203,6 +207,50 @@ it to level 1 as `SWXCEN`/`SWYCEN`. Those move by about ±40 pixels (461-545), w
 states; the spacecraft yaw and pitch (`P2_X0`/`P2_Y0`, attitude telemetry) explain only part of it. A limb fit on our JPEGs
 (`APID_20.ipynb`, section 10, and `extract_images.py --process`) reproduces `SWXCEN`/`SWYCEN` to a median of 0.1-0.15 pixel. The
 limb at 17.4 nm is about 2 pixels outside the photospheric radius.
+
+## Level 1 (`p2sw_prep.py`)
+
+`p2sw_prep.py` is a Python port of the SolarSoft pipeline that makes the archive's level 1 files (`swap_prep/`, IDL,
+`p2sw_prep.pro` v1.5), with the calibration files of `swap_caldb/`. One function per IDL routine, in the same order:
+
+| Step | Routine | What it does (as the archive runs it) |
+|---|---|---|
+| 1 | `p2sw_hdrchk` | refuses LAR, LED/dark and off-pointed images; detector temperature (`TEMPDARK`) interpolated in time |
+| 2 | `p2sw_pmcdiv` | divides by 2 / 4 the pixels multiplied on board (none: the pixel maps hold only 0 and 1) |
+| 3 | `p2sw_pixrep` | puts back pixels from the FITS extension (none) and sets pixels >= 0.95 x 4094 to 4400 (none: max 3588) |
+| 4 | `p2sw_drksub` | subtracts the dark current, a cubic in the detector temperature per pixel, x `EXPTIME`; clips at the 1 % level |
+| 5 | `p2sw_pmcrep` | replaces the 6 466 unread pixels by their 3 x 3 median |
+| 6 | `p2sw_ffcorr` | divides by the flat field |
+| 7 | `p2sw_despike` | replaces pixels > 6 robust sigma (MAD, 5 x 5) from their 5 x 5 median by it (~32 000 per image) |
+| (8) | `p2sw_psfcor` | PSF deconvolution (stray light), optional band removal: not in the archive, `--psf` |
+| 9 | `p2sw_imgcor` | limb fit, then sun centered, pixels squared (y x 1.0036) and solar north up (roll, -0.3 deg mount, `SOLAR_EP`) in one cubic interpolation |
+| 10 | `p2sw_expnorm` | DN/s |
+
+Written as int16 with `BSCALE` = 1 / (16 x `EXPTIME`), `BZERO` = 2^15 x `BSCALE`, as the archive does.
+
+**Checked against the archive:** the 10 level 0 files of `swap_archive/lv0` with their level 1 files (`swap_archive/lv1`,
+`tests/test_p2sw_prep.py`): sun center, `SWAVINT` and the number of despiked pixels are the same in all 10, 98.5-99.7 % of
+the pixels are the same integer and the rest are 1 or 2 steps (0.006-0.013 DN/s) off. That took reproducing IDL's single
+precision where it changes the result:
+
+- The dark current is the sum of four terms of ~1e5 that cancel to ~15 DN: its float32 rounding (~0.1 DN) decides which
+  pixels the despiking takes. It is evaluated left to right in float32, and the 273.15 of `float(TEMPDARK + 273.15)` is a
+  float32 literal (272.4067078 K instead of 272.4067383 K turned 241 despiking decisions in one image).
+- `POLY_2D` starts each row exactly and adds the x step in float32: the coordinates drift by up to 0.01 pixel along a row.
+  Without it only 58 % of the pixels match.
+- `POLY_2D` takes points up to x < 1024 (extrapolating the last half pixel), not x <= 1023.
+- `INTERPOLATE` (limb profile) has float32 coordinates and `CURVEFIT` stops when chi-square improves by < 1e-3: both move the
+  fitted center by ~1e-5 pixel, enough to round it to another 0.01 now and then.
+
+**On our images** (`extract_images.py --level1`) the JPEG is turned back into the level 0 image (flipped, `RECODE_TABLE`)
+and header: `CD`/`CROTA` from `LANG_ROT`, `SOLAR_EP` and `RSUN_ARC` computed from the date (0.001 deg and 0.015 arcsec from
+the archive's). Not in our telemetry: the detector temperature and the LAR timing. With `--archive-headers` they come
+from the archive's level 0 header of the same image (matched by `DATE-OBS`, 1 s); otherwise the temperature is -0.73 C
+(the median of the 281 archive files, which range from -1.3 to +1.5 C; 1 C is ~1.8 DN of dark per pixel) and images
+blurred by a LAR are not caught. All 14 dumps with `--archive-headers swap_archive/lv0_headers`: 318 level 1 images of
+328, the other 10 refused as taken during a LAR. On the 248 that have an archive level 1 file, the sun center is within
+0.01 pixel (median) of `SWXCEN`/`SWYCEN`, within 0.5 pixel for 247, and `SWAVINT` within 0.25 % for 90 %; against the 10
+archive level 1 images, the median pixel is the same and 99 % are within 4.6 % (the JPEG's loss).
 
 ## APID 21 (LYRA raw data)
 
