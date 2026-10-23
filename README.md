@@ -280,3 +280,73 @@ in 12, 1, 6, 8 and 3.
   record of *when* something was uploaded, not of *what*.
 
 Conclusion: APID 14 is a command log with no measurements.
+
+## APID 8 (command channel and test data stream)
+
+Explored in `APID_8.ipynb`. 600 packets in all 13 dumps (569 on virtual channel 1, 31 on 2), 589 pass the CRC-16. All have the PUS secondary header
+`10 <service> <subtype>`; offsets are bytes into the whole packet, big-endian.
+
+- **Kinds:** telecommand verification reports 1/1 accepted (242), 1/7 completed (229) and 1/8 failed (15, error code `0x0050`, all in dump 6), connection
+  test 17/2 (5), event 5/2 (13, same body every 1 086 s) and data 8/133 (85).
+- **Commands:** request packet id `0x1808`, so telecommands are sent to APID 8, on their own 14 bit counter: 1 168-2 702 in August (about 100 a day), 823-940 in
+  October, so it was reset in between (APID 14's was not). The sequence count is shared by all packets, and **a data packet sits between the 1/1 and the 1/7
+  of the command that asked for it** (85 of 85).
+- **Data packet:** 4 zero bytes, function code (`0x6a` or `0x79`, byte 21), 4 byte length (22-25, exactly the number of data bytes), data, CRC. Answers are 1, 4, 5
+  or 257 bytes; the 5 byte ones hold multiples of 16.
+- **Poll:** one command (839 on 2025-10-10, 2494 on 2025-08-21) is executed every 2 s with the same sequence count, probably an on-board schedule. Each answer is
+  256 bytes of a continuous FIFO-like stream of 16 byte records (tag, 24 bit stamp at 7 200 Hz, 12 bytes). Every 0.5 s a cycle of four records (`7d 3d fd 8d`):
+  a free-running counter, a 10 step staircase (stride 350 mod 500) with a reading that is the same in August and October, slow counters and noise. That looks like a
+  self-test cycle, not a measurement. Extra records between the cycles are a `0x55`/`0xaa` pattern with one wrong bit and a 32 bit address (memory test log; 326 of 362
+  are the same bit).
+- **Not** the Sun, SWAP offsets, LYRA, or (judging by timing) TPMU/DSLP.
+
+Conclusion: APID 8 is the command/response link of an on-board unit with a self-test stream; open: what the function codes and the unit are.
+
+## APID 11 (telecommand verification reports, stored procedure)
+
+Explored in `APID_11.ipynb`. 132 packets (50 on virtual channel 1, 81 on 2), in dumps 10, 8, 6 and 1 (plus one stray debris packet in dump 5 and in the eclipse dump).
+
+- **Reports:** 130 are 24 bytes, PUS service 1 (`10 01 01` accepted, `10 01 07` completed), the APID 14 layout; 129 pass the CRC-16. Request packet id `0x180b`, so
+  telecommands are sent to APID 11, with their own 14 bit counter (949-1 244 in August, 2 565-2 614 on 2025-10-09). No data of any kind.
+- **Commands:** 67 in 4 dumps (08-14, 08-17, 08-19, 10-09), 15-18 each. Unlike APID 14 and 8 the completion is *not* 1 ms after the acceptance: each command is accepted when the
+  previous one completes, taking 0 to 49 s. The durations (1, 0, 15, 7, 40-49, 13, 2-8 s) are the same in every dump: the steps of a stored procedure, whose second half (the
+  counts +8 to +15, same durations) starts 1.5-5 hours later. Two later commands (count +36 to +156) come 900 and 905 s into the dump.
+- Nothing about the Sun, SWAP or LYRA.
+
+Conclusion: APID 11 only says when a subsystem ran a scripted procedure, not what it did.
+
+## APIDs 130-133 (memory dump and housekeeping of one unit)
+
+Explored in `APID_13x.ipynb`. All have the PUS secondary header `10 <service> <subtype>` and bytes 9-10 `00 00`, then the tick (11-14), fraction (15-16) and a CRC-16 at the end. They
+come in the same few minutes of every ground contact (weekends too), and in the two dumps that have the APID 8 poll, in the same minutes as it.
+
+- **APID 130** (62 packets, PUS 6/6 memory dump report): four packets of 32 800 bytes = 17 byte header, `00 00 00 00`, memory id `01`, start address (22-25: 0x0, 0x8000, 0x10000, 0x18000),
+  length (26-29: 0x8000), data, CRC. 128 KB from address 0, a burst 3 s apart (a second one 180 s later in some dumps). The pieces at 0x8000-0x18000 are byte for byte the same in all dumps
+  over 7 weeks (static; 0x8000 is dense, the others 63 % zero with a repeated `00 00 02 08`). The piece at 0 changes between dumps and always fails the CRC: about 64 records of 16 bytes (an increasing
+  4 byte time tag) in front of mostly `0xff`. Not decoded.
+- **APID 131** (14 packets, PUS 3/25): 48 bytes, once per burst of 130; of its 29 payload bytes only about six change. A status/configuration report.
+- **APIDs 132 and 133** (about 99 packets each, PUS 3/25): 292 bytes, same tick and sequence count, every 30 s for about 5 minutes per dump: 65 words `80 <channel> <12 bit value>`, an empty word and a footer
+  (`00 00 00 03` / `00 00 00 0c`). 12 bit ADC housekeeping scan; 133 reads mid scale (2048) at 25 positions where 132 reads 2 050-3 100.
+- Nothing about the Sun, SWAP, LYRA or plasma (DSLP/TPMU).
+
+Conclusion: the housekeeping and memory dump of one on-board unit (APID 8 is probably its command channel), not science data.
+
+## APIDs 17 and 5 (checked by hand, no notebook)
+
+Nine packets each, in dumps 1, 6, 8, 9 and 10 (APID 17) and 1 and 8 (APID 5), all on virtual channel 1 or 2.
+
+- **APID 17** is intelligible: another command target, like APIDs 14, 8 and 11. Five PUS 1/1 acceptance reports (24 bytes, request packet id `0x1811`, so telecommands go to
+  APID 17) and five 22 byte PUS 5/1 event packets, one of each per dump (the event alone in dump 9). CRC-16 passes. No completion reports, no data.
+- **APID 5** is not telemetry. The packets start with `10 05`, which is a *telecommand* header (type bit set, APID 5), not a downlink packet id. They are back-to-back telecommand
+  packets (115 and 201 bytes, a few truncated, 8 in dumps 1 and 8) with rising sequence counts (`cd8e`, `cd90`, `cf9a`, `db60`, `f254`...) and a time tag (`1b f2 86 e0` in dump 1) that,
+  halved, is a tick inside the span of the dump. Probably time-tagged commands being uplinked and caught on virtual channel 2. Their CRC fails, so either another checksum or damage. Not
+  looked into further; if the payload is a table (pointing, offsets) it would be worth decoding.
+
+## What can be done with the APID 130 memory dump
+
+Probably not much without documentation. Tested: the dense piece at 0x8000 is not zlib, raw deflate, bzip2 or lzma at the first 64 offsets, has no `1f 9d` (LYRA's `compress`)
+magic and no SPARC `save`/`retl`/`nop` patterns; its byte statistics are not random (bytes with 0, 1, 7 or 8 bits set are over-represented), so it is structured, but of
+what is unknown. The pieces at 0x10000 and 0x18000 are 63 % zeros with a repeated `00 00 02 08`. The one piece worth effort is the live one at address 0: a log with a growing time tag,
+which could date events (the 1 086 s event of APID 8) if its units were pinned down. The static pieces could hold a calibration or pointing table, but nothing says so, and 128 KB from address 0 is a
+small slice of the memory map. More progress needs another memory range (new dump requests) or the unit's documentation.
+Cheap next try: read the 0x8000 piece as packed 12/14 bit samples (12 bit fields are used in APIDs 132/133) and compare the log time tags with the 1 086 s events.
