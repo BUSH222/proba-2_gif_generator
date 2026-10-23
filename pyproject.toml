@@ -1,18 +1,22 @@
 [project]
 name = "proba-2-gif-generator"
 version = "0.1.0"
-description = "Stabilize and color PROBA-2 SWAP imagery and generate GIFs"
+description = "Calibrated, tinted PROBA-2 SWAP images and GIFs from raw .cadu dumps"
 requires-python = ">=3.14"
 dependencies = [
-    "imageio==2.37.0",
-    "imageio-ffmpeg==0.6.0",
-    "numpy==2.2.6",
-    "opencv-python==4.12.0.88",
+    "astropy>=8.0.2",
+    "imageio>=2.37",
+    "imageio-ffmpeg>=0.6",
+    "numpy>=2.5.4",
+    "pillow>=13.0.0",
+    "scipy>=1.18.1",
+    "sunpy>=8.0.1",
 ]
 
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
     "ruff>=0.16.5",
     "ty>=0.0.78",
 ]
@@ -54,6 +58,7 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 python_files = "test_*.py"
 python_functions = "test_*"
 

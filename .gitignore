@@ -1,8 +1,15 @@
 .DS_Store
 *.png
 *.jpg
+*.cadu
+!demo.cadu
 
-tests/
+
+SWAP_pro/
+swap_pipeline/swap_archive/
+swap_pipeline/sample/
+swap_archive/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

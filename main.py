@@ -1,274 +1,224 @@
+"""PROBA-2 SWAP images from raw .cadu dumps (SatDump): calibrated, sun centered, solar north up, tinted, and stitched
+into a GIF (and an MP4).
+
+    uv run main.py -i cadus/proba2_dump.cadu             # -> cadus/SWAP_pro/SWAP_<time>.png + out.gif
+    uv run main.py -i cadus --make_mp4                   # every dump in the folder -> ./SWAP_pro, + out.mp4
+
+Every image goes through the archive's level 1 pipeline (swap_pipeline/p2sw_prep.py, a port of SolarSoft's
+p2sw_prep.pro): dark current, flat field, bad pixels, despiking, sun centered, square pixels, solar north up. The
+orientation comes from the spacecraft roll in the telemetry and a fit of the solar limb, so no alignment between frames
+is needed. --raw skips the calibration and keeps the decoded grey levels, aligned the same way.
+"""
+
 import argparse
-import contextlib
-import os
-import subprocess
+import sys
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
-import cv2
-import imageio
-import numpy as np
+from swap_pipeline import render
+from swap_pipeline.extract_images import (
+    DETECTOR_TEMP,
+    LEVEL1_WORKERS,
+    Level1Job,
+    assemble,
+    collect,
+    decode,
+    find_archive_header,
+    find_cadu_files,
+    image_name,
+    load_archive_headers,
+    make_aligned,
+    make_level1,
+)
 
-
-def find_circle(img):
-    """Detect circle in the image using Hough Transform."""
-    blurred = cv2.medianBlur(img, 5)
-    circles = cv2.HoughCircles(
-        blurred,
-        cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=img.shape[0] // 8,
-        param1=50,
-        param2=30,
-        minRadius=294,
-        maxRadius=310,
-    )
-
-    if circles is not None:
-        circles = np.round(circles[0, :]).astype("int").tolist()
-        return circles[0]
-    return None
+OUT_DIR = "SWAP_pro"
+GIF_NAME = "out.gif"
+MP4_NAME = "out.mp4"
 
 
-def shift_image(img, current_x, current_y, target_x=1024 / 2, target_y=1024 / 2):
-    """Shift image so that (current_x, current_y) moves to (target_x, target_y)."""
-    shift_x = target_x - current_x
-    shift_y = target_y - current_y
-    translation_matrix = np.float32([[1, 0, shift_x], [0, 1, shift_y]])
-    shifted_img = cv2.warpAffine(img, translation_matrix, (img.shape[1], img.shape[0]))
-    return shifted_img
-
-
-def match_rotation(img_base, img_to_rotate):
-    """Find best 90° step rotation of img_to_rotate to match img_base."""
-    correlations = []
-    for k in range(4):
-        rotated_img = np.rot90(img_to_rotate, k)
-        res = cv2.matchTemplate(rotated_img, img_base, cv2.TM_CCOEFF_NORMED)
-        score = res[0][0]
-        correlations.append(score)
-    best_k = int(np.argmax(correlations))
-    best_score = correlations[best_k]
-    aligned_img = np.rot90(img_to_rotate, best_k)
-    return aligned_img, best_score
-
-
-def feature_align(
-    img_base,
-    img_to_align,
-    max_features=500,
-    good_match_percent=0.15,
-    max_translation=20,
-    max_rotation_deg=15,
-    min_scale=0.9,
-    max_scale=1.1,
-):
-    """Align img_to_align to img_base using feature matching + affine transform."""
-    orb = cv2.ORB_create(max_features)
-
-    kp1, des1 = orb.detectAndCompute(img_base, None)
-    kp2, des2 = orb.detectAndCompute(img_to_align, None)
-
-    if des1 is None or des2 is None:
-        return img_to_align, np.eye(2, 3, dtype=np.float32)
-
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = matcher.match(des1, des2)
-
-    if len(matches) < 4:
-        return img_to_align, np.eye(2, 3, dtype=np.float32)
-
-    matches = sorted(matches, key=lambda x: x.distance)
-    num_good = int(len(matches) * good_match_percent)
-    matches = matches[: max(4, num_good)]
-
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
-
-    M, _inliers = cv2.estimateAffinePartial2D(pts2.reshape(-1, 1, 2), pts1.reshape(-1, 1, 2))
-
-    if M is None:
-        return img_to_align, np.eye(2, 3, dtype=np.float32)
-
-    tx, ty = M[0, 2], M[1, 2]
-    a, b = M[0, 0], M[1, 0]
-
-    translation_magnitude = np.sqrt(tx**2 + ty**2)
-
-    rotation_rad = np.arctan2(b, a)
-    rotation_deg = np.degrees(rotation_rad)
-
-    scale = np.sqrt(a**2 + b**2)
-
-    if translation_magnitude > max_translation:
-        print(f"Warning: Translation too large ({translation_magnitude:.1f} > {max_translation} px), skipping.")
-        return img_to_align, np.eye(2, 3, dtype=np.float32)
-
-    if abs(rotation_deg) > max_rotation_deg:
-        print(f"Warning: Rotation too large ({rotation_deg:.1f}° > ±{max_rotation_deg}°), skipping.")
-        return img_to_align, np.eye(2, 3, dtype=np.float32)
-
-    if scale < min_scale or scale > max_scale:
-        print(f"Warning: Scale out of range ({scale:.3f} not in [{min_scale}, {max_scale}]), skipping.")
-        return img_to_align, np.eye(2, 3, dtype=np.float32)
-    h, w = img_base.shape[:2]
-    aligned = cv2.warpAffine(
-        img_to_align, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
-    )
-
-    return aligned, M
-
-
-def run_imagemagick_tint(out_path):
-    cmd = ["magick", "mogrify", "-fill", "#edb103", "-tint", "100", "-contrast-stretch", "0.3%", "SWAP_*"]
+def colour(text: str) -> str:
     try:
-        subprocess.run(cmd, cwd=out_path, check=True)
-    except Exception:
-        cmd = ["mogrify", "-fill", "#edb103", "-tint", "100", "-contrast-stretch", "0.3%", "SWAP_*"]
-        subprocess.run(cmd, cwd=out_path, check=True)
+        render.parse_color(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+    return text
 
 
-def main(in_path, out_path, extra_rotation=0, no_magick=False, fps=5, make_mp4=False):
-    sample_path = os.path.join(
-        in_path,
-        sorted(
-            os.listdir(in_path),
-            key=lambda x: (x[:21], len(x), x) if (x.endswith(".png") or x.endswith(".jpg")) else (float("inf"), 0),
-        )[0],
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Calibrated, north up and tinted PROBA-2 SWAP images and a GIF from .cadu dumps."
     )
-    sample_image = cv2.imread(sample_path, cv2.IMREAD_UNCHANGED)
-
-    if not os.path.exists(out_path):
-        os.makedirs(out_path)
-
-    processed_count = 0
-
-    for file_name in sorted(os.listdir(in_path), key=lambda x: (x[:21], len(x), x)):
-        if not (file_name.endswith(".png") or file_name.endswith(".jpg")):
-            continue
-
-        img = cv2.imread(os.path.join(in_path, file_name), cv2.IMREAD_UNCHANGED)
-
-        circles = find_circle(img)
-        if circles is None:
-            print(f"Warning: No circle found in {file_name}, skipping.")
-            continue
-        centered_img = shift_image(img, circles[0], circles[1])
-        rotated_img, _best_rotation = match_rotation(sample_image, centered_img)
-        rotated_circles = find_circle(rotated_img)
-        if rotated_circles is None:
-            print(f"Warning: No circle found after rotation in {file_name}, skipping.")
-            continue
-        rotated_recentered_img = shift_image(rotated_img, rotated_circles[0], rotated_circles[1])
-
-        fine_aligned, _M = feature_align(sample_image, rotated_recentered_img)
-
-        cv2.imwrite(os.path.join(out_path, file_name), fine_aligned)
-
-        processed_count += 1
-        if processed_count % 2 == 0:
-            sample_image = fine_aligned.copy()
-
-    if not no_magick:
-        try:
-            run_imagemagick_tint(out_path)
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"ImageMagick mogrify failed: {e}. You can use --no_magick to disable it.")
-    else:
-        print("Skipping ImageMagick tinting.")
-
-    # Gif creation
-    out_files = [
-        f
-        for f in sorted(os.listdir(out_path), key=lambda x: (x[:21], len(x), x))
-        if (f.endswith(".png") or f.endswith(".jpg"))
-    ]
-    images = []
-    tmp_dir = os.path.join(out_path, "_tmp_rot")
-    if extra_rotation:
-        if no_magick:
-            print("Skipping extra rotation as ImageMagick is disabled.")
-            gif_files = [os.path.join(out_path, f) for f in out_files]
-        else:
-            if not os.path.exists(tmp_dir):
-                os.makedirs(tmp_dir)
-            angle = 90 * extra_rotation
-            rotated_files = []
-            for f in out_files:
-                src = os.path.join(out_path, f)
-                dst = os.path.join(tmp_dir, f)
-                cmd = ["magick", "convert", src, "-rotate", str(angle), dst]
-                try:
-                    subprocess.run(cmd, check=True)
-                    rotated_files.append(dst)
-                except Exception as e:
-                    cmd = ["convert", src, "-rotate", str(angle), dst]
-                    try:
-                        subprocess.run(cmd, check=True)
-                        rotated_files.append(dst)
-                    except Exception:
-                        print(f"Failed to rotate image {f} with both magick and convert commands.")
-                    print(f"ImageMagick rotate failed for {f}: {e}")
-            gif_files = rotated_files
-    else:
-        gif_files = [os.path.join(out_path, f) for f in out_files]
-
-    for f in gif_files:
-        img = cv2.imread(f)
-        if img is not None:
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            images.append(img_rgb)
-
-    if images:
-        gif_path = os.path.join(out_path, "out.gif")
-        imageio.mimsave(gif_path, images, "GIF", fps=fps, loop=0)
-
-    if make_mp4:
-        mp4_path = os.path.join(out_path, "out.mp4")
-        imageio.mimsave(mp4_path, images, "FFMPEG", fps=fps)
-
-    if extra_rotation and os.path.exists(tmp_dir):
-        for f in os.listdir(tmp_dir):
-            with contextlib.suppress(Exception):
-                os.remove(os.path.join(tmp_dir, f))
-        with contextlib.suppress(Exception):
-            os.rmdir(tmp_dir)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Recenter, rotation-align (by 90° steps), tint, and GIF frames.")
-    parser.add_argument("--in_path", "-i", required=True, help="Input folder with PNG frames")
+    parser.add_argument("cadu", nargs="?", type=Path, help="a .cadu dump, or a folder of them (same as -i)")
+    parser.add_argument("-i", "--in_path", type=Path, help="a .cadu dump, or a folder of them")
     parser.add_argument(
-        "--out_path", "-o", default=None, help="Output folder for processed frames and GIF (default: <in_path>_pro)"
+        "-o", "--out_path", type=Path, help=f"output folder (default: {OUT_DIR} next to the dump or the folder)"
     )
     parser.add_argument(
-        "--extra_rotation",
         "-r",
+        "--extra_rotation",
         type=int,
         choices=[0, 1, 2, 3],
         default=0,
-        help="Extra CCW rotation in 90° steps (0..3, default: 0)",
+        help="extra clockwise rotation in 90 degree steps, of the images and the animations (default: 0; the images "
+        "are already solar north up)",
     )
-    parser.add_argument(
-        "--no_magick",
-        action="store_true",
-        help="Use this flag if magick is not installed as a global command. \
-                        Some features will be disabled but the program will run.",
+    parser.add_argument("-f", "--fps", type=float, default=10, help="GIF and MP4 frames per second (default: 10)")
+    parser.add_argument("--make_mp4", "--mp4", action="store_true", help=f"also render the images as {MP4_NAME}")
+    parser.add_argument("--no_gif", action="store_true", help=f"don't stitch the images into {GIF_NAME}")
+
+    look = parser.add_argument_group("look")
+    look.add_argument(
+        "--color",
+        choices=["tint", "none"],
+        default="tint",
+        help="tint the images with --tint (default), or keep them grey",
     )
-    parser.add_argument("--fps", "-f", type=int, default=10, help="GIF frames per second (default: 10)")
-    parser.add_argument(
-        "--make_mp4",
+    look.add_argument(
+        "--tint", type=colour, default=render.GOLD, help=f"tint colour, #rrggbb (default: {render.GOLD})"
+    )
+    look.add_argument(
+        "--stretch",
+        type=float,
+        default=render.STRETCH,
+        help="contrast stretch: percent of the pixels clipped to black and to white, over all the images together "
+        "(default: 0, the P2SC's brightness; 0.3 is the old ImageMagick look, which clips the brightest regions)",
+    )
+    look.add_argument(
+        "--scaling",
+        choices=("helioviewer", "quicklook", "p2sw"),
+        default="helioviewer",
+        help="look of the calibrated images: 'helioviewer' as the P2SC's JPEG 2000 images on Helioviewer (tone curve "
+        "and sharpening; default), 'quicklook' as their quicklook PNGs and movies (plain square root, softer), "
+        "'p2sw' as the SWAP team's p2sw_write_png (shows more faint corona)",
+    )
+    look.add_argument("--no_magick", action="store_true", help="deprecated: same as --color none --stretch 0")
+
+    pipeline = parser.add_argument_group("pipeline")
+    pipeline.add_argument(
+        "--raw",
         action="store_true",
-        help="Create an MP4 video from the processed frames. Requires ffmpeg to be installed.",
+        help="no calibration: only orient and align the decoded images, keeping their own grey levels",
+    )
+    pipeline.add_argument("--fits", action="store_true", help="also keep the level 1 FITS file of every image")
+    pipeline.add_argument(
+        "--archive-headers",
+        type=Path,
+        help="folder of the archive's level 0 headers or FITS files: their detector temperature and LAR timing are "
+        "used for the same images",
+    )
+    pipeline.add_argument(
+        "--detector-temp",
+        type=float,
+        default=DETECTOR_TEMP,
+        help=f"detector temperature (C) for the dark current of images without an archive header "
+        f"(default: {DETECTOR_TEMP})",
     )
     args = parser.parse_args()
 
+    if args.cadu and args.in_path and args.cadu != args.in_path:
+        parser.error("give the input once: as an argument or with -i")
+    args.in_path = args.in_path or args.cadu
+    if args.in_path is None:
+        parser.error("no input: give a .cadu dump or a folder of them (-i)")
+    if not args.in_path.exists():
+        parser.error(f"no such file or folder: {args.in_path}")
+    if args.raw and args.fits:
+        parser.error("--fits needs the calibration: it can't go with --raw")
+    if args.fps <= 0:
+        parser.error("--fps must be positive")
+    if not 0 <= args.stretch < 50:
+        parser.error("--stretch is a percentage per end, from 0 to under 50")
+    if args.no_magick:
+        print("note: --no_magick is no longer needed (nothing calls ImageMagick); it means --color none --stretch 0")
+        args.color, args.stretch = "none", 0.0
     if args.out_path is None:
-        args.out_path = args.in_path.rstrip("/\\") + "_pro"
+        args.out_path = args.in_path.parent / OUT_DIR  # alongside the dump, or alongside the folder of dumps
+    return args
 
-    main(
-        in_path=args.in_path,
-        out_path=args.out_path,
-        extra_rotation=args.extra_rotation,
-        no_magick=args.no_magick,
-        fps=args.fps,
-        make_mp4=args.make_mp4,
+
+def make_jobs(args: argparse.Namespace, cadu_files: list[Path]) -> tuple[list[Level1Job], int]:
+    """One job per decodable image, in time order, and the number of images without a usable first packet."""
+    images, clocks = collect(cadu_files)
+    archive = load_archive_headers(args.archive_headers) if args.archive_headers else []
+    jobs: list[Level1Job] = []
+    names: set[str] = set()
+    unreadable = 0
+    for _, image in sorted(images.items()):
+        for keep_bit_errors in (True, False):  # bit errors are usually harmless, but can wreck a decode
+            assembled = assemble(image, keep_bit_errors)
+            pixels = decode(assembled.jpeg) if assembled else None
+            if pixels is not None:
+                break
+        if assembled is None or pixels is None:
+            unreadable += 1
+            continue
+        start = clocks[image.dump].utc(assembled.header.start)
+        name = base = image_name(start)
+        count = 0
+        while name in names:  # two images in the same second
+            name = f"{base}-{count}"
+            count += 1
+        names.add(name)
+        jobs.append(
+            Level1Job(
+                pixels,
+                assembled.header,
+                start,
+                find_archive_header(archive, start),
+                args.detector_temp,
+                args.out_path,
+                name,
+                write_fits=args.fits,
+                scaling=args.scaling,
+                save_png=False,
+            )
+        )
+    return jobs, unreadable
+
+
+def main() -> int:
+    args = parse_args()
+    cadu_files = find_cadu_files([args.in_path])
+    if not cadu_files:
+        print(f"no .cadu files in {args.in_path}", file=sys.stderr)
+        return 1
+    print(f"reading {len(cadu_files)} dump{'s' * (len(cadu_files) > 1)}", file=sys.stderr)
+    jobs, unreadable = make_jobs(args, cadu_files)
+    args.out_path.mkdir(parents=True, exist_ok=True)
+
+    names, notes, frames = [], [], []
+    with ProcessPoolExecutor(max_workers=LEVEL1_WORKERS) as pool:  # a few seconds per image: side by side
+        for job, (_, frame, note) in zip(jobs, pool.map(make_aligned if args.raw else make_level1, jobs), strict=True):
+            if frame is None:
+                print(f"{job.name}: {note}")
+                continue
+            names.append(job.name)
+            notes.append(note)
+            frames.append(frame)
+
+    if frames:
+        # the same stretch for every image (no flicker), then the rotation; the tint is the palette they're saved with
+        low, high = render.stretch_limits(frames, args.stretch)
+        frames = [render.rotate(render.apply_stretch(frame, low, high), args.extra_rotation) for frame in frames]
+        palette = render.tint_palette(args.tint) if args.color == "tint" else None
+        for name, note, frame in zip(names, notes, frames, strict=True):
+            path = args.out_path / f"{name}.png"
+            render.save_png(frame, path, palette)
+            print(f"{path} ({note})")
+        if not args.no_gif:
+            render.save_gif(frames, args.out_path / GIF_NAME, args.fps, palette)
+            print(f"{args.out_path / GIF_NAME} ({len(frames)} frames)")
+        if args.make_mp4:
+            render.save_mp4(frames, args.out_path / MP4_NAME, args.fps, palette)
+            print(f"{args.out_path / MP4_NAME} ({len(frames)} frames)")
+
+    print(
+        f"saved {len(frames)} {'aligned' if args.raw else 'calibrated'} images in {args.out_path}; "
+        f"{len(jobs) - len(frames)} refused, {unreadable} without a usable first packet",
+        file=sys.stderr,
     )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
