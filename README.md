@@ -3,6 +3,7 @@ Trying to extract LYRA and the calibration data from proba-2 cadus
 
 TODO: To settle APID 22, compare it with a LYRA file for August–October 2025 from the P2SC archive. A matching LED or calibration cycle would confirm it.
 TODO: Check if PROBA-V GPS log format matches PROBA-2's to get more out of APID 18
+TODO: Check if APID 21 correlates with a partial eclipse .cadu
 
 ## APID 20 (SWAP images)
 
@@ -185,3 +186,64 @@ Explored in `APID_0.ipynb`. Only 27 packets of the 271 472 in the dumps.
 - **LYRA / Sun / attitude:** nothing.
 
 Conclusion: APID 0 is a time reference sent every 6 minutes, nothing else in it is real.
+
+## APID 21 (compressed 4 channel time series, a LYRA candidate)
+
+Explored in `APID_21.ipynb`. 697 packets, all on virtual channel 2, in three dumps only: 10 (261), 8 (221) and 6 (215). Offsets are bytes
+into the whole packet.
+
+- **Packet:** secondary header `10 08 8b`, marker `00 01`, tick counter (11-14, one tick is one second) and fraction (15-16) as in the other
+  APIDs, CRC-16/CCITT over the whole packet at the end (99.9 % pass). One packet every 50 s (ticks step 50, sometimes 51).
+- **Sample counter:** 3 byte counters at 19 and 23, the second always 1000 more than the first; the next packet starts 2 after the last
+  one. Against the tick it runs at 20 units per second, so it is a 20 Hz sample counter and a packet covers 1002 of its units.
+- **Compressed block:** bytes 94-95 are the length of what follows (packet length - 98), and the block from byte 96 to the CRC starts with
+  `1F 9D 8C`: the magic of the Unix `compress` program, block mode, 12 bit codes. LZW with the codes in groups of 8 (see the decoder in
+  the notebook, 696 of 697 packets decode, the last has a bad CRC too).
+- **Decompressed block:** 8071 bytes (8082 in 6 packets), made of 4 blocks of 501 signed 24 bit numbers (a first value and then 500 first
+  differences, which is what a lag 1 autocorrelation of -0.5 shows): 4 channels of 501 samples, one every 2 counter units (10 per second);
+  then the first counter again (4 bytes), 500 words of 4 bytes (all `2`, a flag per sample?), and 5 time marks of 7 bytes (tick, fraction,
+  `00`) plus 5 counters of 4 bytes, the marks 10 s and 200 counts apart, which ties the counter to the clock (the 8082 byte blocks have 6).
+  The first mark is 40-51 s before the packet's tick.
+- **Values:** the 4 channels sit at flat levels of about 435, 330, 360 and 1100 counts, noise 0.5-2.3 counts within a packet, and channels 0,
+  2 and 3 drift together by a few counts over an hour (like an offset that follows a temperature). No eclipse, day / night or flare
+  signature in the three windows of 1.5-1.8 h (GPS dates 2025-08-14 15:04, 2025-08-17 02:23, 2025-08-19 02:16).
+- **4 packets are another record** in the same wrapper (bytes 40-41 are `0x195A` instead of 0; two pairs with equal ticks in dumps 6 and 8): the
+  flags are not all 2 and channel 3 comes out in the millions, so they do not read like the others. Not decoded.
+- **LYRA:** the best candidate yet by structure (4 channels, 20 Hz counter, compressed on board, a flag per sample, time marks), but the
+  channels show no solar signal, only flat levels, so they would be dark / offset values, or another instrument. To decide, compare with
+  a LYRA raw file for these windows, or find the ICD.
+- **Eclipse dump (`proba2_dump_aug_12_eclipse.cadu`, 2026-08-12):** 40 APID 21 packets, none usable as is: no CRC passes, blocks of about 3.5 kB
+  (4 frames) instead of 1.6 kB, and the dump has hundreds of frame counter jumps (80-90 % of its APID 18 and 2 packets pass the CRC).
+  Reed-Solomon correction does not help (it drops the uncorrectable frames, and no packet is left whole). Decoded up to the first error,
+  18 packets give channel 0 (2 658 samples, about a fifth of the 93 minutes), 3 give channel 1, 2 channel 2 and 1 channel 3. They are
+  flat (channel 0 at 466-474, channel 1 at 326, channel 2 at 345, channel 3 at 829, against 435, 330, 362, 1 100 a year earlier), with no dip
+  in the recovered part; only the last packet has channel 0 about 12 counts lower. So no eclipse signature in APID 21. The same dump has 375
+  APID 20 (SWAP images) packets and no APID 22.
+- **Sun position / attitude:** nothing.
+
+Conclusion: APID 21 is fully decodable, and it is the nearest thing to LYRA raw data found so far by structure, but its channels do not react to
+an eclipse, so they look like dark / offset values and not an irradiance.
+
+## APID 14 (telecommand verification reports)
+
+Explored in `APID_14.ipynb`. 1 738 packets, 1 541 on virtual channel 1 (stored) and 197 on channel 2 (real time), in all 13 dumps but mostly
+in 12, 1, 6, 8 and 3.
+
+- **Reports:** 1 735 packets are 24 bytes, PUS service 1 (telecommand verification): `10 01 01` (subtype 1, acceptance, 868) and `10 01 07`
+  (subtype 7, completion of execution, 866). The rest (61, 75, 721 bytes) is debris, the 61 byte one an APID 2 report with a corrupted APID.
+  Layout: marker `00 01` (9-10), tick (11-14) and fraction (15-16) of the report, `00` (17), the request id of the command (18-21) and a
+  CRC-16/CCITT (99.9 % pass).
+- **Request id:** packet id `0x180E` (version 0, type 1 = telecommand, secondary header, APID 14) in every report, and the packet sequence
+  control (flags 3, 14 bit count). So the telecommands are sent to APID 14 and APID 14 in the downlink is the answer to them.
+- **Commands:** 852 distinct commands in the 13 dumps, 849 with both reports. Acceptance and completion are 1.2 ms apart (0.7-1.6 ms for
+  90 %). The same report is seen on both virtual channels in 30 cases.
+- **Counter:** +1 per command within a burst. Over time it goes 2 981 (2025-08-08) to 5 447 (08-23), then only 61 more until 5 508 (10-09) and
+  5 738 (10-10), so there was far less commanding in September; one step back between the dumps of August 19 and 20 (4 639, then 4 499).
+  The counter climbs by about 2 800 over the two months, the dumps contain only 852 of the commands.
+- **Bursts:** 1 to 3 per dump, 20 to 100 commands one to two seconds apart that last a minute or two (plus a few single commands). In 6 of the
+  dumps they are late in the span of the telemetry, in 3 early, and in dump 1 the main burst is 5 hours before it: probably uploads in the
+  ground contact. The content of the commands is not in the downlink.
+- **LYRA / Sun / attitude:** nothing. A LYRA setting change (the integration time, for instance) has to be commanded, so this is the only
+  record of *when* something was uploaded, not of *what*.
+
+Conclusion: APID 14 is a command log with no measurements.
