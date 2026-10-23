@@ -1,9 +1,14 @@
 # Experimental environment
-Trying to extract LYRA and the calibration data from proba-2 cadus
+Extracting the scientific and calibration data of PROBA-2 from the CADU dumps in `cadus/`.
 
-TODO: To settle APID 22, compare it with a LYRA file for August–October 2025 from the P2SC archive. A matching LED or calibration cycle would confirm it.
+- **LYRA: found.** It is APID 21 (see below).
+- **Other science data to find:** DSLP (Dual segmented Langmuir probe), TPMU (Thermal plasma measurement unit). They should be in the dumps, but they may be degraded and off at times. TPMU (along with DSLP, maybe) should power on at 14:01:03 UTC and off at 16:33:04 during weekdays only. Other reports suggest that it is 210 minutes per weekday, starting at 14:00 UTC. This may be a clue to uncovering the data, since it is very likely to be absent during the weekends.
+- **Next big target: the SWAP pixel offset values**, needed to calibrate the images properly. The metadata of the image packets has no field for
+  them (see "Where the sun center, attitude and position are not").
+
+TODO: APID 22 (8 channels of int16 at 592 Hz, a pulse every 1.75 s) is not LYRA. Check it, and the groups of float32 columns in APID 2, against DSLP/TPMU, start with the date.
+TODO: Look for the SWAP offsets in the APIDs not explored yet, in the later image packets and in the JPEG stream.
 TODO: Check if PROBA-V GPS log format matches PROBA-2's to get more out of APID 18
-TODO: Check if APID 21 correlates with a partial eclipse .cadu
 
 ## APID 20 (SWAP images)
 
@@ -89,6 +94,74 @@ The F4/F6 text records in APID 18 are the only position-like numbers found so fa
 Still to look at: the secondary headers of the later image packets, the housekeeping packets, the other APIDs (2 and 22 are done, see
 below) and the JPEG stream itself.
 
+## APID 21 (LYRA raw data)
+
+Explored in `APID_21.ipynb`. 697 intact packets, all on virtual channel 2, in three dumps only: 10 (261), 8 (221) and 6 (215), plus 40 damaged ones in
+the eclipse dump. Offsets are bytes into the whole packet, including the 6 byte primary header, and all numbers are big-endian. The packets are
+cut from the frames like the others (`cadu.py`).
+
+### Packet
+
+- **0-5, primary header:** packet id `0x0815` (version 0, secondary header, APID 21), sequence control, length.
+- **6-8:** secondary header `10 08 8b`. **9-10:** `00 01`. **11-14:** tick counter (one tick is one second, the same counter as APIDs 2, 18 and 22) and
+  **15-16:** its fraction (/ 65536). **17-18:** zeros.
+- **19-21 and 23-25:** two 3 byte sample counters. The second is always the first + 1000, and the next packet starts 2 after the last one. Against
+  the tick the counter runs at 20 units per second: it is a 20 Hz sample counter, and a packet covers 1002 of its units.
+- **26-93:** constant. Zeros, except `4A` at 33, `1F 9A` at 76-77 and `02` at 82 and 91 (not understood). **40-41** is the kind of record: 0 in 693 packets,
+  `0x195A` in 4 (see below).
+- **94-95:** length of the compressed block (packet length - 98). **96 to the last 2 bytes:** the compressed block. **Last 2 bytes:** CRC-16/CCITT over the
+  whole packet (99.9 % pass).
+- **Cadence:** one packet every 50 s (ticks step 50, sometimes 51), about 1.6 kB each.
+
+### Compressed block
+
+It starts with `1F 9D 8C`, the magic of the Unix `compress` program (block mode, 12 bit codes), so the data is LZW compressed on board. The codes come in
+groups of 8, as `compress` writes them; the decoder is in the notebook and 696 of 697 packets decode (the one that does not has a bad CRC too).
+
+### Decompressed block
+
+8071 bytes (8082 in 6 packets, which have one more time mark). Offsets in the block:
+
+- **0-6011:** 4 channels of 501 signed 24 bit numbers: a first value, then 500 first differences (the lag 1 autocorrelation of the differences is -0.5,
+  which is what white noise differenced looks like). One sample every 2 counter units, i.e. 10 per second per channel. Channel *n* is LYRA channel *n* + 1:
+  Lyman alpha, Herzberg, aluminium filter, zirconium filter.
+- **6012-6015:** the first counter again.
+- **6016-8015:** 500 words of 4 bytes, all `2` in normal packets (a flag per sample? not understood).
+- **8016-8070:** 5 time marks of 7 bytes (tick, fraction, `00`), then 5 counters of 4 bytes. The marks are 10 s and 200 counts apart, which ties the counter
+  to the clock: the time of a sample is the mark time + (its counter - the mark's counter) / 20. The first mark is 40-51 s before the packet's tick.
+
+### Identification as LYRA
+
+Against LYRA level 1 (raw, in kHz) for the dumps 10, 8 and 6 (2025-08-14, 08-17, 08-19). Level 1 is not in sunpy's `Fido`; the files are at
+`https://proba2.sidc.be/lyra/data/eng/YYYY/MM/DD/lyra_YYYYMMDD-000000_lev1_std.fits`.
+
+- **Scale:** the APID 21 counts are 50 times the rate in kHz, a count in 50 ms, with no fitted scale: slope 50.0 (Zr, r = 0.996-0.998) and 50.1-50.2
+  (Al, r = 0.98-0.99). The UV channels vary by only 1-2 counts (r = 0.86-0.97). The mean difference is -0.09, -0.07, -0.08 and -0.23 counts and the
+  residual 1.2, 0.65, 0.4 and 1.6 counts rms, in every dump.
+- **Features:** the Herzberg spikes, the Zr dips, a flare in dump 8 (Al +9, Zr +80 counts) and the start of one in dump 6 are in both, at the same
+  time and with the same size. So the "flat levels" of 435, 330, 360 and 1100 counts are real LYRA counts, not dark values.
+- **Clock:** the APID 21 sample times (with the offset of APID 18) are ahead of UTC by 21.11 s (08-14), 18.51 s (08-17) and 16.38 s (08-19), found as sharp
+  minima of the residual against level 1: the 18 s of leap seconds plus a drift of about 0.9 s per day of the on-board tick clock. So times from one
+  offset are only good to a few seconds.
+- **Not an exact copy** of the level 1 `std` file (residual 0.4-1.6 counts rms): another LYRA unit, or another instant of the 50 ms. Not tested; the
+  level 1 directory also has `bst`, `bca`, `bre`, `cal`, `met` and `rej` files.
+
+### The 4 packets of another kind and the eclipse dump
+
+- **Bytes 40-41 are `0x195A`** in 4 packets (two pairs with equal ticks, in dumps 6 and 8), in the same wrapper: the flags are not all 2 and channel 3
+  comes out in the millions, so they do not read like the others. Not decoded.
+- **Eclipse dump (`proba2_dump_aug_12_eclipse.cadu`, 2026-08-12):** 40 APID 21 packets, none usable as is: no CRC passes, blocks of about 3.5 kB
+  (4 frames) instead of 1.6 kB, and the dump has hundreds of frame counter jumps (80-90 % of its APID 18 and 2 packets pass the CRC).
+  Reed-Solomon correction does not help (it drops the uncorrectable frames, and no packet is left whole). Decoded up to the first error,
+  18 packets give channel 0 (2 658 samples, about a fifth of the 93 minutes), 3 give channel 1, 2 channel 2 and 1 channel 3. They are flat, with
+  only the last packet, at 17:17:15 on the GPS clock, in the eclipse: LYRA's zirconium is at -9.5 % and aluminium at -1.1 % at that minute, and
+  channel 0 is 2.3 % lower. It is 7 samples, and the correlation over all recovered samples (+0.78 at lag 0) is not significant (40-150 of 2 161
+  lags are higher), so the eclipse adds nothing to the identification. The same dump has 375 APID 20 (SWAP images) packets and no APID 22.
+
+Conclusion: **APID 21 is LYRA raw data**: 4 channels, 10 samples per second of counts per 50 ms, compressed with `compress`, in packets of 50 s with a
+sample counter and time marks. It reproduces LYRA level 1 (kHz x 50) on three days with no fitted scale, flares included (notebook, sections 9 and 10).
+What is left: the 4 packets of another kind, the flags (all 2), the constant header bytes, the small offset against the `std` file, and the clock drift.
+
 ## APID 2 (housekeeping telemetry)
 
 Explored in `APID_2.ipynb`, on the same 13 dumps. 18 399 packets, 12 280 on virtual channel 2, 6 113 on channel 1 and 6 on channel 5.
@@ -106,9 +179,8 @@ Offsets here are bytes into the whole packet, including the 6 byte primary heade
   about 4 minutes. A first calibration against the SWAP timestamps gave 0.256 s per tick; that was wrong, the SWAP timestamps are what
   runs slow (see APID 18).
 - **Losses:** 97.8 % of the sequence count steps are 1.
-- **LYRA:** no packet contains the string "LYRA", and no column looks like a four channel science stream. The reports are at best every
-  2 s, which rules out 20 Hz channel data. If LYRA is in here it is housekeeping (temperatures, voltages). Several layouts have groups
-  of 4-7 float columns whose changes are correlated (for example offsets 62-90 of 292 / 1), which would fit, but nothing confirms it.
+- **Float columns:** several layouts have groups of 4-7 float32 columns whose changes are correlated (for example offsets 62-90 of 292 / 1). Not identified;
+  a candidate to check against DSLP/TPMU.
 - **Attitude:** no group of 4 (quaternion) or 3 (direction) big-endian float32 with unit norm in any layout. Fixed point or float64
   encodings would not have been found.
 
@@ -135,9 +207,7 @@ most). Offsets are bytes into the whole packet.
   about 10 000, and fall back at once; the pulse repeats every 129-130 frames (1.75 s).
 - **154 byte chunks** (11 329 found, index 0 and 1 in pairs): one channel, each chunk a linear ramp (for example -550 to -200) that
   restarts in the next chunk, a sawtooth. 140 samples/s.
-- **LYRA:** possible, not confirmed. The rate (74 Hz per channel) is below LYRA's 100 Hz, and LYRA has two calibration LEDs per detector,
-  which a cycled ramp pulse could be. But 8 channels (LYRA has 4 per unit, 3 units) that are dark between pulses are not a solar irradiance.
-  A LYRA file of the same dates or the ICD is needed to decide.
+- **Not LYRA** (that is APID 21). What it is stays open: 8 channels that sit near 0 between pulses are not a solar irradiance, so DSLP/TPMU is a candidate.
 - **Sun position / attitude:** nothing in it.
 
 ## APID 18 (GPS receiver text)
@@ -165,7 +235,7 @@ Explored in `APID_18.ipynb`. 5 025 packets, 4 466 on virtual channel 2. Same pac
   satdump's day offset 18630 and the unit of the 32 bit field). The image file names are affected.
 - **Position:** none. F4 and F6 have time and raw satellite measurements only; a position needs the satellite ephemerides, which are not in
   these records (they could come from the navigation message elsewhere, or from a public ephemeris for these dates).
-- **LYRA / Sun / attitude:** nothing.
+- **Sun / attitude:** nothing.
 
 Conclusion: APID 18 is decodable GPS receiver telemetry. It gives the real date and an accurate clock for all other APIDs, but no spacecraft position.
 
@@ -183,46 +253,9 @@ Explored in `APID_0.ipynb`. Only 27 packets of the 271 472 in the dumps.
   fraction (/ 65536), `00`. No secondary header and no CRC. The tick is the counter of the other APIDs and lies inside the time span of
   its dump, so with the GPS offset from APID 18 they are dated 2025-08-08 to 2025-10-10. The sequence count goes up by one per packet, and
   against the tick it gives a period of 367.6 s (about 6 min 7.6 s, between 366.7 and 368.5 s per gap, jitter of the packet time).
-- **LYRA / Sun / attitude:** nothing.
+- **Sun / attitude:** nothing.
 
 Conclusion: APID 0 is a time reference sent every 6 minutes, nothing else in it is real.
-
-## APID 21 (compressed 4 channel time series, a LYRA candidate)
-
-Explored in `APID_21.ipynb`. 697 packets, all on virtual channel 2, in three dumps only: 10 (261), 8 (221) and 6 (215). Offsets are bytes
-into the whole packet.
-
-- **Packet:** secondary header `10 08 8b`, marker `00 01`, tick counter (11-14, one tick is one second) and fraction (15-16) as in the other
-  APIDs, CRC-16/CCITT over the whole packet at the end (99.9 % pass). One packet every 50 s (ticks step 50, sometimes 51).
-- **Sample counter:** 3 byte counters at 19 and 23, the second always 1000 more than the first; the next packet starts 2 after the last
-  one. Against the tick it runs at 20 units per second, so it is a 20 Hz sample counter and a packet covers 1002 of its units.
-- **Compressed block:** bytes 94-95 are the length of what follows (packet length - 98), and the block from byte 96 to the CRC starts with
-  `1F 9D 8C`: the magic of the Unix `compress` program, block mode, 12 bit codes. LZW with the codes in groups of 8 (see the decoder in
-  the notebook, 696 of 697 packets decode, the last has a bad CRC too).
-- **Decompressed block:** 8071 bytes (8082 in 6 packets), made of 4 blocks of 501 signed 24 bit numbers (a first value and then 500 first
-  differences, which is what a lag 1 autocorrelation of -0.5 shows): 4 channels of 501 samples, one every 2 counter units (10 per second);
-  then the first counter again (4 bytes), 500 words of 4 bytes (all `2`, a flag per sample?), and 5 time marks of 7 bytes (tick, fraction,
-  `00`) plus 5 counters of 4 bytes, the marks 10 s and 200 counts apart, which ties the counter to the clock (the 8082 byte blocks have 6).
-  The first mark is 40-51 s before the packet's tick.
-- **Values:** the 4 channels sit at flat levels of about 435, 330, 360 and 1100 counts, noise 0.5-2.3 counts within a packet, and channels 0,
-  2 and 3 drift together by a few counts over an hour (like an offset that follows a temperature). No eclipse, day / night or flare
-  signature in the three windows of 1.5-1.8 h (GPS dates 2025-08-14 15:04, 2025-08-17 02:23, 2025-08-19 02:16).
-- **4 packets are another record** in the same wrapper (bytes 40-41 are `0x195A` instead of 0; two pairs with equal ticks in dumps 6 and 8): the
-  flags are not all 2 and channel 3 comes out in the millions, so they do not read like the others. Not decoded.
-- **LYRA:** the best candidate yet by structure (4 channels, 20 Hz counter, compressed on board, a flag per sample, time marks), but the
-  channels show no solar signal, only flat levels, so they would be dark / offset values, or another instrument. To decide, compare with
-  a LYRA raw file for these windows, or find the ICD.
-- **Eclipse dump (`proba2_dump_aug_12_eclipse.cadu`, 2026-08-12):** 40 APID 21 packets, none usable as is: no CRC passes, blocks of about 3.5 kB
-  (4 frames) instead of 1.6 kB, and the dump has hundreds of frame counter jumps (80-90 % of its APID 18 and 2 packets pass the CRC).
-  Reed-Solomon correction does not help (it drops the uncorrectable frames, and no packet is left whole). Decoded up to the first error,
-  18 packets give channel 0 (2 658 samples, about a fifth of the 93 minutes), 3 give channel 1, 2 channel 2 and 1 channel 3. They are
-  flat (channel 0 at 466-474, channel 1 at 326, channel 2 at 345, channel 3 at 829, against 435, 330, 362, 1 100 a year earlier), with no dip
-  in the recovered part; only the last packet has channel 0 about 12 counts lower. So no eclipse signature in APID 21. The same dump has 375
-  APID 20 (SWAP images) packets and no APID 22.
-- **Sun position / attitude:** nothing.
-
-Conclusion: APID 21 is fully decodable, and it is the nearest thing to LYRA raw data found so far by structure, but its channels do not react to
-an eclipse, so they look like dark / offset values and not an irradiance.
 
 ## APID 14 (telecommand verification reports)
 
@@ -243,7 +276,7 @@ in 12, 1, 6, 8 and 3.
 - **Bursts:** 1 to 3 per dump, 20 to 100 commands one to two seconds apart that last a minute or two (plus a few single commands). In 6 of the
   dumps they are late in the span of the telemetry, in 3 early, and in dump 1 the main burst is 5 hours before it: probably uploads in the
   ground contact. The content of the commands is not in the downlink.
-- **LYRA / Sun / attitude:** nothing. A LYRA setting change (the integration time, for instance) has to be commanded, so this is the only
+- **Sun / attitude:** nothing. A setting change of an instrument (the integration time of LYRA, for instance) has to be commanded, so this is the only
   record of *when* something was uploaded, not of *what*.
 
 Conclusion: APID 14 is a command log with no measurements.

@@ -7,7 +7,9 @@ dependencies = [
     "ipykernel>=7.4.0",
     "matplotlib>=3.11.2",
     "numpy>=2.5.4",
+    "pandas>=3.1.0",
     "pillow>=13.0.0",
+    "sunpy[net,timeseries,visualization]>=8.0.1",
 ]
 
 [dependency-groups]
