@@ -1,11 +1,15 @@
 .DS_Store
 *.png
+!lyra_level2.png
 *.jpg
 *.cadu
 !demo.cadu
+!demo_lyra.cadu
 
 
 SWAP_pro/
+LYRA/
+lyra/
 swap_pipeline/swap_archive/
 swap_pipeline/sample/
 swap_archive/

@@ -21,9 +21,6 @@ def main():
     parser.add_argument("path", help="Path to the input directory")
     parser.add_argument("--range", default="all", help="Image range (e.g., 'all' or '0-5')")
     parser.add_argument("--method", choices=["avg", "median", "ks"], default="avg", help="Stacking method")
-    parser.add_argument(
-        "-r", "--extra_rotation", type=int, default=0, help="Rotate final result by steps of 90° clockwise"
-    )
     args = parser.parse_args()
 
     files = [f for f in os.listdir(args.path) if f.lower().endswith((".png", ".jpg"))]
@@ -70,9 +67,6 @@ def main():
         result = np.ma.mean(masked_stack, axis=0).filled(mean)
 
     result = np.clip(result, 0, 255).astype(np.uint8)
-
-    if args.extra_rotation:
-        result = np.rot90(result, k=-args.extra_rotation)
 
     out_path = os.path.join(args.path, f"stacked_{args.method}.png")
     Image.fromarray(result).save(out_path)

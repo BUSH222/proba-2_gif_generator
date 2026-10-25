@@ -1,4 +1,4 @@
-"""Turning the grey level frames of the pipeline into the files people look at: tint, contrast stretch, rotation, PNG,
+"""Turning the grey level frames of the pipeline into the files people look at: tint, contrast stretch, PNG,
 GIF and MP4. Everything works on uint8 grey frames plus one shared 256 colour palette, so a tinted frame is stored as
 its grey levels and a palette (P mode): lossless, and every frame of an animation has exactly the same colours."""
 
@@ -55,11 +55,6 @@ def apply_stretch(frame: np.ndarray, low: int, high: int) -> np.ndarray:
         return frame
     lut = np.clip(np.round((np.arange(256) - low) * 255.0 / (high - low)), 0, 255).astype(np.uint8)
     return lut[frame]
-
-
-def rotate(frame: np.ndarray, steps: int) -> np.ndarray:
-    """Turn by 90 degree steps clockwise."""
-    return np.ascontiguousarray(np.rot90(frame, -steps)) if steps % 4 else frame
 
 
 def to_image(frame: np.ndarray, palette: list[int] | None) -> Image.Image:

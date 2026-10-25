@@ -19,7 +19,7 @@ it. The packet format itself, with how each field was verified against the archi
   │ 10. geometry          p2sw_prep.p2sw_imgcor     center, square pixels, solar north up
   │ 11. DN/s              p2sw_prep.p2sw_expnorm    ÷ exposure time
   │ 12. tone + sharpening p2sw_prep.helioviewer_bytes  DN/s → grey 0-255, Helioviewer look
-  │ 13. stretch, rotation render.apply_stretch / rotate (both off by default)
+  │ 13. stretch           render.apply_stretch (off by default)
   └ 14. colour + files    render.tint_palette / save_png / save_gif / save_mp4
 ```
 
@@ -341,13 +341,12 @@ The alternatives are `--scaling quicklook` (`13.42 √x + 9.7`, the P2SC's quick
 lifted to 9.7) and `--scaling p2sw` (`255.9999 · (x^0.25 − 0.5) / 3.7`, the SWAP team's `p2sw_write_png`: more faint
 corona).
 
-## 13. Optional stretch and rotation (`render.stretch_limits`, `apply_stretch`, `rotate`)
+## 13. Optional stretch (`render.stretch_limits`, `apply_stretch`)
 
 - **Stretch, `--stretch P`, default 0 (off).** From the combined histogram of *all* frames, find the grey levels
   `low` and `high` below and above which P % of the pixels lie, then map `low → 0` and `high → 255` linearly with a
   lookup table. Using one pair for the whole set keeps an animation from flickering. It clips, though: 0.3 % (the old
   ImageMagick setting) moves white down to about 200 DN/s and flattens active regions, which is why it is off.
-- **Rotation, `-r k`.** `np.rot90(frame, −k)`: k quarter-turns clockwise, for a framing other than solar north up.
 
 ## 14. Colour and output files (`render.tint_palette`, `save_png`, `save_gif`, `save_mp4`)
 
@@ -384,6 +383,6 @@ JPEG grey g (0-255)
   → 18.0335 · x^0.4485 − 0.8329           display grey (float)
   → + 0.7724 · (detail above σ 2.16 px)   mid-scale contrast
   → Gauss σ 0.58 px, round, clip          final grey 0-255
-  → (stretch, rotation: off by default)
+  → (stretch: off by default)
   → palette[grey]                         gold RGB on screen
 ```

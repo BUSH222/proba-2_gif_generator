@@ -1,0 +1,41 @@
+{
+  "comment": "LYRA level 2 = k (d / 1 AU)^2 (level 1 - d0 - a exp(b T)) + G; level 1 = round(counts / integration_ms, 6). T: unit 2 temperature in C from temperature_poly (numpy polyval) of the raw word, fitted over temperature_range. Fitted in calibrate_lyra.ipynb (experimental branch) on the PROBA2 archive since epoch. G: degradation.csv.",
+  "integration_ms": 49.9894193,
+  "temperature_poly": [
+    5.876600936895061e-08,
+    -0.0029869838697916666,
+    66.51950307884134
+  ],
+  "temperature_range": [
+    49.0,
+    52.0
+  ],
+  "default_temperature": 50.5,
+  "epoch": "2025-03-25",
+  "channels": [
+    {
+      "k": 1.28113848e-05,
+      "d0": 7.000848,
+      "a": 1.272312e-05,
+      "b": 0.240884
+    },
+    {
+      "k": 0.00102583741,
+      "d0": 6.455,
+      "a": 0.0,
+      "b": 0.0
+    },
+    {
+      "k": 0.000141720406,
+      "d0": 6.32463,
+      "a": 0.0002820584,
+      "b": 0.138467
+    },
+    {
+      "k": 2.16453158e-05,
+      "d0": 6.299687,
+      "a": 0.0004799281,
+      "b": 0.168691
+    }
+  ]
+}

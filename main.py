@@ -53,18 +53,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-o", "--out_path", type=Path, help=f"output folder (default: {OUT_DIR} next to the dump or the folder)"
     )
-    parser.add_argument(
-        "-r",
-        "--extra_rotation",
-        type=int,
-        choices=[0, 1, 2, 3],
-        default=0,
-        help="extra clockwise rotation in 90 degree steps, of the images and the animations (default: 0; the images "
-        "are already solar north up)",
-    )
     parser.add_argument("-f", "--fps", type=float, default=10, help="GIF and MP4 frames per second (default: 10)")
     parser.add_argument("--make_mp4", "--mp4", action="store_true", help=f"also render the images as {MP4_NAME}")
     parser.add_argument("--no_gif", action="store_true", help=f"don't stitch the images into {GIF_NAME}")
+    parser.add_argument(
+        "--decode-lyra",
+        action="store_true",
+        help="also run lyra.py on the same input, with its default settings (LYRA irradiance FITS files and a plot, "
+        "in LYRA/ next to the dump or the folder)",
+    )
 
     look = parser.add_argument_group("look")
     look.add_argument(
@@ -91,7 +88,6 @@ def parse_args() -> argparse.Namespace:
         "and sharpening; default), 'quicklook' as their quicklook PNGs and movies (plain square root, softer), "
         "'p2sw' as the SWAP team's p2sw_write_png (shows more faint corona)",
     )
-    look.add_argument("--no_magick", action="store_true", help="deprecated: same as --color none --stretch 0")
 
     pipeline = parser.add_argument_group("pipeline")
     pipeline.add_argument(
@@ -128,9 +124,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--fps must be positive")
     if not 0 <= args.stretch < 50:
         parser.error("--stretch is a percentage per end, from 0 to under 50")
-    if args.no_magick:
-        print("note: --no_magick is no longer needed (nothing calls ImageMagick); it means --color none --stretch 0")
-        args.color, args.stretch = "none", 0.0
     if args.out_path is None:
         args.out_path = args.in_path.parent / OUT_DIR  # alongside the dump, or alongside the folder of dumps
     return args
@@ -197,9 +190,9 @@ def main() -> int:
             frames.append(frame)
 
     if frames:
-        # the same stretch for every image (no flicker), then the rotation; the tint is the palette they're saved with
+        # the same stretch for every image (no flicker); the tint is the palette they're saved with
         low, high = render.stretch_limits(frames, args.stretch)
-        frames = [render.rotate(render.apply_stretch(frame, low, high), args.extra_rotation) for frame in frames]
+        frames = [render.apply_stretch(frame, low, high) for frame in frames]
         palette = render.tint_palette(args.tint) if args.color == "tint" else None
         for name, note, frame in zip(names, notes, frames, strict=True):
             path = args.out_path / f"{name}.png"
@@ -217,6 +210,11 @@ def main() -> int:
         f"{len(jobs) - len(frames)} refused, {unreadable} without a usable first packet",
         file=sys.stderr,
     )
+
+    if args.decode_lyra:
+        import lyra  # only when asked: it pulls in the LYRA pipeline
+
+        return lyra.main([str(args.in_path)])
     return 0
 
 
